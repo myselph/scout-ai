@@ -4,6 +4,7 @@ import random
 from typing import Callable, cast
 from common import Scout, Show, Move, InformationState, Util, RecordedMove, RecordedScoutAndShow, RecordedScout, RecordedShow, Card
 import math
+from enum import Enum, auto
 
 
 def _initial_cards_per_player(num_players: int) -> int:
