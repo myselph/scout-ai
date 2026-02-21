@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scout-engine"
+version = "0.1.0"
+description = "Scout card game engine"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+py-modules = [
+    "common",
+    "evaluation",
+    "game_state",
+    "ismcts_player",
+    "main",
+    "merge_pickles",
+    "neural_value_function",
+    "players",
+    "power_analysis",
+    "self_play",
+    "self_play_agents",
+    "test_all",
+    "train_neural_value_function"
+]
+
