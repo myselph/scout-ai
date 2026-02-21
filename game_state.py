@@ -86,6 +86,11 @@ def _simulate(num_players: int,
         player_index = (player_index + 1) % num_players
     return partial_hand, removed_cards
 
+class FinishedStatus(Enum):
+    NOT_FINISHED = auto()
+    FINISHED_TOO_MANY_STEPS = auto()
+    FINISHED_EMPTY_HANDS = auto()
+    FINISHED_TOO_MANY_SCOUTS = auto()
 
 class GameState:
     num_players: int
@@ -102,7 +107,7 @@ class GameState:
     can_scout_and_show: list[bool]
     history: list[RecordedMove]
     initial_flip_executed: bool  # Whether the initial flip has been executed.
-    finished: bool  # Whether the game is over.
+    finished: FinishedStatus  # Whether the game is over.
 
     def __init__(self, num_players: int, dealer: int, max_moves: int = 1000):
         self.num_players = num_players
@@ -115,19 +120,19 @@ class GameState:
         self.table = []
         self.history = []
         self.initial_flip_executed = False
-        self.finished = False
+        self.finished = FinishedStatus.NOT_FINISHED
         self.moves_left = max_moves
 
     def move(self, m: Move):
         assert self.initial_flip_executed
-        assert not self.finished
+        assert self.finished == FinishedStatus.NOT_FINISHED
         assert Util.is_move_valid(self.hands[self.current_player], self.table,
                                   self.can_scout_and_show[self.current_player], m)
         if isinstance(m, Scout):
             scouted_card = self._scout(m)
             recorded_move = RecordedScout(m, scouted_card)
             if (self.current_player + 1) % self.num_players == self.scout_benefactor:
-                self.finished = True
+                self.finished = FinishedStatus.FINISHED_TOO_MANY_SCOUTS
         elif isinstance(m, Show):
             (s, r) = self._show(m)[:]
             recorded_move = RecordedShow(m, tuple(s), tuple(r))
@@ -140,7 +145,7 @@ class GameState:
                     m.show, tuple(s), tuple(r)))
             self.can_scout_and_show[self.current_player] = False
         if not self.hands[self.current_player]:
-            self.finished = True
+            self.finished = FinishedStatus.FINISHED_EMPTY_HANDS
         self.history.append(recorded_move)
         self.current_player = (self.current_player + 1) % self.num_players
         # I added the max moves counter; there is no such thing in official
@@ -150,10 +155,10 @@ class GameState:
         # problems (famous last words).
         self.moves_left -= 1
         if self.moves_left == 0:
-            self.finished = True
+            self.finished = FinishedStatus.FINISHED_TOO_MANY_STEPS
 
     def is_finished(self):
-        return self.finished
+        return self.finished != FinishedStatus.NOT_FINISHED
 
     def maybe_flip_hand(self, flip_fns: list[Callable[[list[Card]], bool]]):
         assert not self.initial_flip_executed
