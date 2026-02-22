@@ -7,7 +7,11 @@ name = "scout-engine"
 version = "0.1.0"
 description = "Scout card game engine"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "torch",
+    "numpy",
+    "pyparsing"
+]
 
 [tool.setuptools]
 py-modules = [
