@@ -303,7 +303,7 @@ class InformationState:
     # sample from the returned collection, and that can't be done easily with
     # sets (requires conversion to tuple or list). I'm therefore returning a
     # tuple - that still allows for hashing, but also allows for sampling.
-    def possible_moves(self) -> tuple[Move, ...]:
+    def possible_moves(self, coalesce = True) -> tuple[Move, ...]:
         # Return a list of legal moves the player can make.
         # First, generate Scout candidates. We do not call is_move_valid to
         # speed things up, instead simply avoiding invalid moves by
@@ -321,7 +321,7 @@ class InformationState:
 
         # Show candidates - generate possible ones in an efficient manner, then
         # filter out those (and only those) that have the same length as the
-        # table, but won't beat it. It is crucial that this code runs.
+        # table, but won't beat it.
         hand_values = [c[0] for c in self.hand]
         table_values = [c[0] for c in self.table]
         shows = list(Util.find_shows(hand_values, table_values))
@@ -340,17 +340,21 @@ class InformationState:
                     if scout.first else table_values[:-1]
                 show_moves = Util.find_shows(new_hand_values, new_table_values)
                 for show in show_moves:
+                    # Some Scout-and-Show moves are redundant, see below; we
+                    # can deduplicate them so exploration is more efficient.
+                    # However, this is undesirable when using the returned moves
+                    # in a UI, so we have a coalesce option.
                     # 1. If we scout a card and play it again right away, the
                     # insert position does not matter -> skip insert positions
                     # other than 0.
-                    if show.startPos == scout.insertPos and show.length == 1 \
+                    if coalesce and show.startPos == scout.insertPos and show.length == 1 \
                             and scout.insertPos != 0:
                         continue
                     # 2. If we scout a card and insert it right next to the
                     # Show sequence, it does not matter if we insert it left
                     # or right of that sequence -> skip the left insert. We know
                     # there is a matching right insert.
-                    if scout.insertPos == show.startPos - 1:
+                    if coalesce and scout.insertPos == show.startPos - 1:
                         continue
                     scout_and_shows.append(ScoutAndShow(scout, show))
 
