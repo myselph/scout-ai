@@ -25,4 +25,10 @@ py-modules = [
     "test_all",
     "train_neural_value_function"
 ]
+packages = [
+    "simple_agent_weights"
+]
+
+[tool.setuptools.package-data]
+simple_agent_weights = ["*.pth", "*.md"]
 

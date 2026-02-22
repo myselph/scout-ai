@@ -3,14 +3,16 @@
 # network. We train the networks inside; at inference time, the agent is wrapped
 # in a Player and used in tournaments.
 
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Sequence
 from math import inf
 import torch
 from torch import nn
 from abc import ABC, abstractmethod
 
-from common import InformationState, StateAndScoreRecord
+from common import InformationState, Move, StateAndScoreRecord
 import neural_value_function
+from players import PlanningPlayer
 
 
 class Agent(ABC):
@@ -117,6 +119,24 @@ class Agent(ABC):
         with torch.no_grad():
             value = self.compute_values((pre_move_state,))
         return float(value.item())
+
+
+class NeuralPlayer(PlanningPlayer):
+    # A Player wrapping an agent that wraps a neural policy and value network.
+    def __init__(self, agent: Agent):
+        self.agent = agent
+
+    def select_move(self, info_state: InformationState) -> Move:
+        moves, raw_post_move_states = info_state.post_move_states()
+        post_move_states = self.agent.featurize(raw_post_move_states)
+        action_idx, _ = self.agent.select_action(post_move_states)
+        return moves[action_idx]
+
+    def flip_hand(self, hand: Sequence[tuple[int, int]]) -> bool:
+        # TODO: Implement. Would be nice to use value_fn for that, but I'm not
+        # sure how to derive an information state.
+        # For now, use PlanningPlayer's heuristic method.
+        return super().flip_hand(hand)
 
 
 class AgentCollection:
@@ -229,6 +249,12 @@ class SimpleAgent(Agent):
 
 
 class SimpleAgentCollection(AgentCollection):
+    @staticmethod
+    def load_default_agent() -> Agent:
+        base_dir = os.path.dirname(__file__)
+        policy_path = os.path.join(base_dir, "simple_agent_weights", "simple_agent_0_it_79_skill_1.95.pth")
+        return SimpleAgentCollection.load_agents([policy_path])[0]
+
     @staticmethod
     def create_agents(num_agents: int) -> list[Agent]:
         state_dim = 57

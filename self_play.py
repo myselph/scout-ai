@@ -12,7 +12,7 @@ from main import play_tournament
 from players import GreedyShowPlayerWithFlip, PlanningPlayer, RandomPlayer
 import argparse
 
-from self_play_agents import Agent, SimpleAgentCollection, TransformerAgentCollection
+from self_play_agents import Agent, NeuralPlayer, SimpleAgentCollection, TransformerAgentCollection
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--batch_size",
@@ -69,22 +69,7 @@ class Trajectory:
     transitions: List[Transition]
 
 
-class NeuralPlayer(PlanningPlayer):
-    # A Player wrapping an agent that wraps a neural policy and value network.
-    def __init__(self, agent: Agent):
-        self.agent = agent
 
-    def select_move(self, info_state: InformationState) -> Move:
-        moves, raw_post_move_states = info_state.post_move_states()
-        post_move_states = self.agent.featurize(raw_post_move_states)
-        action_idx, _ = self.agent.select_action(post_move_states)
-        return moves[action_idx]
-
-    def flip_hand(self, hand: Sequence[tuple[int, int]]) -> bool:
-        # TODO: Implement. Would be nice to use value_fn for that, but I'm not
-        # sure how to derive an information state.
-        # For now, use PlanningPlayer's heuristic method.
-        return super().flip_hand(hand)
 
 
 # ----------------------------------------------------------------------
