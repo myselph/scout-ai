@@ -275,6 +275,7 @@ class MultiRoundGameState:
     num_players: int
     _max_moves: int
     _rounds_finished: int
+    _finished: bool
     def __init__(self, num_players: int, dealer: int = 0, max_moves: int = 1000):
         self.num_players = num_players
         self.dealer = dealer        
@@ -284,17 +285,19 @@ class MultiRoundGameState:
         self.game_state = GameState(num_players, dealer, max_moves)
     
     def finished(self) -> bool:
-        return self._rounds_finished == self.num_players
+        if self._finished:
+            return True
+        if self._rounds_finished == self.num_players - 1 and self.game_state.is_finished():
+            self.cum_scores = [self.cum_scores[i] + self.game_state.scores[i] for i in range(self.num_players)]
+            self._finished = True
+            return True
+        return False
 
     def next_round(self) -> bool:
         if self.finished():
             return False
-        else:
-            self.cum_scores = [self.cum_scores[i] + self.game_state.scores[i] for i in range(self.num_players)]
-            self._rounds_finished += 1
-            if self.finished():
-                return False
-        
+        self.cum_scores = [self.cum_scores[i] + self.game_state.scores[i] for i in range(self.num_players)]
+        self._rounds_finished += 1
         self.dealer = (self.dealer + 1) % self.num_players
         self.game_state = GameState(self.num_players, self.dealer, self._max_moves)
         return True
