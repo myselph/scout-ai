@@ -270,15 +270,16 @@ class GameState:
 
 class MultiRoundGameState:
     game_state: GameState
-    _num_players: int
+    cum_scores: list[int]
+    dealer: int
+    num_players: int
+    _max_moves: int
     _rounds_finished: int
-    _dealer: int
-    _scores: list[int]
     def __init__(self, num_players: int, dealer: int = 0, max_moves: int = 1000):
-        self._num_players = num_players
+        self.num_players = num_players
         self.dealer = dealer        
-        self.max_moves = max_moves
-        self._scores = [0] * num_players
+        self.cum_scores = [0] * num_players
+        self._max_moves = max_moves
         self._rounds_finished = 0
         self.game_state = GameState(num_players, dealer, max_moves)
     
@@ -289,21 +290,12 @@ class MultiRoundGameState:
         if self.finished():
             return False
         else:
-            self._scores = [self._scores[i] + self.game_state.scores[i] for i in range(self._num_players)]
+            self.cum_scores = [self.cum_scores[i] + self.game_state.scores[i] for i in range(self.num_players)]
             self._rounds_finished += 1
             if self.finished():
                 return False
         
         self.dealer = (self.dealer + 1) % self.num_players
-        self.game_state = GameState(self.num_players, self.dealer, self.max_moves)
+        self.game_state = GameState(self.num_players, self.dealer, self._max_moves)
         return True
-
-    def scores(self) -> list[int]:
-        return self._scores
-    
-
-    
-
-    
-    
 
