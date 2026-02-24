@@ -282,6 +282,7 @@ class MultiRoundGameState:
         self.cum_scores = [0] * num_players
         self._max_moves = max_moves
         self._rounds_finished = 0
+        self._finished = False
         self.game_state = GameState(num_players, dealer, max_moves)
     
     def finished(self) -> bool:
