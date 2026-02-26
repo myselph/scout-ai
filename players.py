@@ -92,8 +92,9 @@ class PlanningPlayer(GreedyShowPlayer):
     # this simply needs to be learnt.
     c: float
 
-    def __init__(self):
-        self.c = 0.25  # found via grid search
+    def __init__(self, c=0.25, scout_penalty=1):
+        self.c = c  # found via grid search
+        self.scout_penalty = scout_penalty
 
     def select_move(self, info_state: InformationState) -> Move:
         moves = info_state.possible_moves()
@@ -108,7 +109,7 @@ class PlanningPlayer(GreedyShowPlayer):
             hand_values_new = self._simulate_scout(
                 hand_values, info_state.table, move)
             return self.c * \
-                self._hand_value(hand_values_new) - len(hand_values_new) - 1
+                self._hand_value(hand_values_new) - len(hand_values_new) - self.scout_penalty
         elif isinstance(move, Show):
             hand_values_new = self._simulate_show(hand_values, move)
             return self.c * \
@@ -118,7 +119,7 @@ class PlanningPlayer(GreedyShowPlayer):
                 hand_values, info_state.table, move.scout)
             hand_values_new = self._simulate_show(hand_values_new, move.show)
             return self.c * \
-                self._hand_value(hand_values_new) - len(hand_values_new) + len(info_state.table) - 1
+                self._hand_value(hand_values_new) - len(hand_values_new) + len(info_state.table) - self.scout_penalty
 
     def _simulate_scout(
             self,

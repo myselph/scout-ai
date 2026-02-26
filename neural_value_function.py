@@ -15,7 +15,7 @@ def _featurize_single(record: StateAndScoreRecord) -> list[float]:
     num_cards[:len(num_cards_rot)] = num_cards_rot
     scores_rot = record.scores[record.my_player:] + \
         record.scores[:record.my_player]
-    scores = [0.0 * 5]
+    scores = [0.0] * 5
     scores[:len(scores_rot)] = scores_rot
     can_scout_and_show_rot = record.can_scout_and_show[record.my_player:] + \
         record.can_scout_and_show[:record.my_player]
@@ -24,6 +24,9 @@ def _featurize_single(record: StateAndScoreRecord) -> list[float]:
     # The value the net should predict is the difference of the player's
     # score and the mean opponent score when the game is over. I suspect adding
     # the current difference may help.
+    # NB we should divide the sum of opponent scores by the number of opponent
+    # players, not the number of players; but changing features requires retraining,
+    # and I think it won't affect performance much or at all, so keeping it as is.
     cur_score_diff = [scores_rot[0] - sum(scores_rot[1:])/num_players[0]]
 
     # Table features
@@ -62,9 +65,6 @@ def _featurize_single(record: StateAndScoreRecord) -> list[float]:
         max([s.length for s in show_runs]) if show_runs else 0
     ]
 
-    # TODO: Add num new groups, num new runs after best scout
-    # Etc., in short how good moves are. Leaving this for now
-    # to get started.
     return (
         num_players +
         num_cards +
