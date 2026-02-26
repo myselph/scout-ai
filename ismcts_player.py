@@ -240,12 +240,12 @@ class IsmctsPlayer(Player):
     # The number of roll-outs we perform.
     # On reasonable values:
     #   I measured the win rate as a function of number of simulations When
-    #   playing against GreedyShowPlayerWithFlip. We get ~0 at 40, about 50% at
+    #   playing against GreedyShowPlayer. We get ~0 at 40, about 50% at
     #   120 rollouts, and 75% at 250; unsurprisingly it follows a logarithm
     #   curve. Using randomly selected moves,
     # On timing:
     #   10 games, 5 rounds each, 10 roll-outs per select_move() takes 30s, when
-    #   playing against 4 GreedyShowPlayerWithFlip.
+    #   playing against 4 GreedyShowPlayer.
     #   So a single round with one roll-out takes about 60ms.
     #   100 games with 100 roll-outs thus take ~3000s.
     _num_simulations: int

@@ -9,7 +9,7 @@ as a dependency.
 ## Getting Started
 This directory is a bit of a mess, because I developed various kinds of players over time, and the methods to evaluate them have improved over time.
 
-* The easiest way to get started is to let two simple AI player implementations compete against each other in a tournament. Check out `main.py` and modify the call to `play_tournament` to e.g. let PlanningPlayer and another player (GreedyShowPlayerWithFlip? RandomPlayer?) compete against each other. Files of importance here are
+* The easiest way to get started is to let two simple AI player implementations compete against each other in a tournament. Check out `main.py` and modify the call to `play_tournament` to e.g. let PlanningPlayer and another player (GreedyShowPlayer? RandomPlayer?) compete against each other. Files of importance here are
    * `players.py` which contains various heuristic player implementations
    * `game_state.py` and `common.py` which contain the game engine (most of the complexity comes from determining what the legal moves are)
    * evaluation.py which contains code to let players compete against each other, and some code to rank them with an Elo-like rating system.

@@ -145,7 +145,7 @@ self play.
 ## ISMCTS experiments
 1. My original ISMCTS version used absolute scores and was fairly slow.
    It barely won 1% against PlanningPlayer even with 20k roll-outs, so I used
-   GreedyShowPlayerWithFlip in the experiments here and below.
+   GreedyShowPlayer in the experiments here and below.
    For the original scoring and all others, I found a saturating relationship
    between rollouts and win rate. This one was roughly
    0% at 40, 50% at 125, and 75%

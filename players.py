@@ -15,10 +15,12 @@ class RandomPlayer(Player):
 
 
 class GreedyShowPlayer(Player):
-    # A player that maximizes for gettng rid of its cards (ie it picks the
+    # A player that maximizes for getting rid of its cards (ie it picks the
     # highest Show and ScoutAndShow moves).
     def flip_hand(self, hand: Sequence[Card]) -> bool:
-        return random.choice([True, False])
+        up_value = self._hand_value([h[0] for h in hand])
+        down_value = self._hand_value([h[1] for h in hand])
+        return up_value < down_value
 
     def select_move(self, info_state: InformationState) -> Move:
         # The linter really has a hard time with this function, and I don't
@@ -45,14 +47,6 @@ class GreedyShowPlayer(Player):
                 next_move = best_scout_and_show
         assert next_move
         return next_move
-
-
-class GreedyShowPlayerWithFlip(GreedyShowPlayer):
-    # Like GreedyShowPlayer, but with non-random flip - improves performance.
-    def flip_hand(self, hand: Sequence[Card]) -> bool:
-        up_value = self._hand_value([h[0] for h in hand])
-        down_value = self._hand_value([h[1] for h in hand])
-        return up_value < down_value
 
 class EpsilonGreedyScorePlayer(Player):
     # A player that picks, with P(1-epsilon), the action that most improves its
@@ -89,11 +83,13 @@ class EpsilonGreedyScorePlayer(Player):
 
 
 
-class PlanningPlayer(GreedyShowPlayerWithFlip):
+class PlanningPlayer(GreedyShowPlayer):
     # A player with a heuristic value function that simulates all moves and
     # picks the one with the highest value. Best performing heuristic player.
     # There are various knobs in the value function one could tune through RL or
-    # grid search.
+    # grid search, and a lot to criticize about the current choices; but 
+    # my intuition for what are good or bad choices is pretty poor, so I suspect
+    # this simply needs to be learnt.
     c: float
 
     def __init__(self):
