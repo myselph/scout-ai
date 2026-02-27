@@ -2,14 +2,13 @@ from __future__ import annotations
 import copy
 import random
 import torch
-import torch.nn as nn
+import time
 from dataclasses import dataclass
 from typing import Callable, List, Sequence, Tuple, Dict, Any
-from common import InformationState, Move
 from evaluation import play_game, rank_against_planning_player
 from game_state import GameState
 from main import play_tournament
-from players import GreedyShowPlayerWithFlip, PlanningPlayer, RandomPlayer
+from players import GreedyShowPlayer, PlanningPlayer
 import argparse
 
 from self_play_agents import Agent, NeuralPlayer, SimpleAgentCollection, TransformerAgentCollection
@@ -37,6 +36,11 @@ parser.add_argument(
     type=int,
     help="Number of episodes per training iteration",
     default=40
+)
+parser.add_argument(
+    '--use_transformer',
+    action='store_true',
+    help='Use transformer-based agents instead of simple feedforward agents'
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -94,31 +98,10 @@ def ppo_loss(
     We assume:
     - policy(obs, move_batch) -> logits for each move in move_batch
     - value_fn(obs) -> scalar value prediction
-
-    NOTE: Because legal action sets differ per item, we must compute
-    action logprobs one sample at a time. I'm sure this could be optimized
-    somehow, but it's not a bottleneck yet.
     """
 
-    batch_size = len(pre_move_states)
-    new_logprobs = []
-    entropies = []
-
-    for i in range(batch_size):
-        post_move_states = post_move_states_list[i]
-        logprobs = agent.compute_logprobs(
-            post_move_states)  # shape: [num_actions]
-
-        # Select logprob of performed action
-        chosen = action_idx[i]
-        new_logprobs.append(logprobs[chosen])
-
-        # Entropy for this decision
-        entropy = -(logprobs * torch.exp(logprobs)).sum()
-        entropies.append(entropy)
-
-    new_logprobs = torch.stack(new_logprobs)  # shape: [batch]
-    entropies = torch.stack(entropies)        # shape: [batch]
+    new_logprobs, entropies = agent.compute_logprobs_and_entropy_batched(
+        post_move_states_list, action_idx)  # each: [batch]
 
     # Probability ratio
     ratio = torch.exp(new_logprobs - old_logprob)
@@ -363,9 +346,9 @@ def ppo_update(
                         pre_move_states=prms,
                         post_move_states_list=psms,
                         action_idx=actions[mb_indices],
-                        old_logprob=old_logprobs[mb_indices],
-                        returns=returns[mb_indices],
-                        advantages=advantages[mb_indices],
+                        old_logprob=old_logprobs[mb_indices].to(device),
+                        returns=returns[mb_indices].to(device),
+                        advantages=advantages[mb_indices].to(device),
                         minibatch_size=minibatch_len  # Normalize by full minibatch size
                     )
                     loss.backward()
@@ -390,11 +373,12 @@ def train(
     # Number of agents we train in an iteration.
     num_agents_train = num_players
     # We keep copies of the best ones.
-    num_best_agents = int(0.2 * num_agents_train)
-    num_best_agents = 0
-    # So overall there are num_agents + num_best_agents agents.
-    # agents = SimpleAgentCollection.create_agents(num_agents_train)
-    agents = TransformerAgentCollection.create_agents(num_agents_train)
+    num_best_agents = int(0.2 * num_agents_train)    
+    num_best_agents = 0    
+    if args.use_transformer:
+        agents = TransformerAgentCollection.create_agents(num_agents_train, device)
+    else:
+        agents = SimpleAgentCollection.create_agents(num_agents_train, device)
 
     best_agents: dict[float, Agent] = {}
 
@@ -403,6 +387,7 @@ def train(
         dealer=dealer)
 
     for iteration in range(num_iterations):
+        t_start = time.time()
         # 1. Self-play
         trajectories = collect_episodes(
             agents,
@@ -411,6 +396,8 @@ def train(
             num_players,
             min_examples_per_player=minibatch_size
         )
+        t_collect_episodes = time.time()
+        print(f"Episode collection took {t_collect_episodes - t_start:.2f} seconds.")
 
         # 2. Flatten storage and compute GAE
         data = flatten_trajectories(trajectories)
@@ -425,24 +412,35 @@ def train(
             microbatch_size=32
         )
         del data
+        t_ppo_update = time.time()
+        print(f"PPO update took {t_ppo_update - t_collect_episodes:.2f} seconds.")
 
         # 4. Evaluation & shuffling.
         if iteration % 5 == 0 and iteration > 0:
             agents_list = agents + list(best_agents.values())
             order, skills = rank_against_planning_player(
-                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=50)
+                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=500)
             agents = [agents_list[i] for i in order[:num_agents_train]]
-            TransformerAgentCollection.save_agents(
-                agents, [
-                    f"transformer_agent_{i}_it_{iteration}_skill_{
-                        skills[i]:.2f}.pth" for i in range(
-                        len(agents))], f"transformer_agent_it_{iteration}_value_fn.pth")
+            if args.use_transformer:
+                TransformerAgentCollection.save_agents(
+                    agents, [
+                        f"transformer_agent_{i}_it_{iteration}_skill_{
+                            skills[i]:.2f}.pth" for i in range(
+                            len(agents))], f"transformer_agent_it_{iteration}_value_fn.pth")
+            else:
+                SimpleAgentCollection.save_agents(
+                    agents, [
+                        f"simple_agent_{i}_it_{iteration}_skill_{
+                            skills[i]:.2f}.pth" for i in range(
+                            len(agents))], f"simple_agent_it_{iteration}_value_fn.pth")
             best_agents = {}
             for i in range(num_best_agents):
                 agent_index = order[i]
                 best_agents[skills[i]] = copy.deepcopy(
                     agents_list[agent_index])
             print(f"Best agents' skills: {list(best_agents.keys())}")
+            t_evaluation = time.time()
+            print(f"Evaluation took {t_evaluation - t_ppo_update:.2f} seconds.")
 
         print(f"Iteration {iteration} completed.")
 
@@ -474,16 +472,22 @@ def main():
     # Play a tournament against RandomPlayer. This is a good sanity check that
     # training works - an untrained net shouldn't do any better than random,
     # while a trained net should win even with a very primitive feature set.
-    print("Tournament against GreedyShowPlayerWithFlip:")
+    print("Tournament against GreedyShowPlayer:")
     play_tournament(
         player_a_factory_fn=lambda: NeuralPlayer(agents[best_agent_index]),
-        player_b_factory_fn=lambda: GreedyShowPlayerWithFlip(),
+        player_b_factory_fn=lambda: GreedyShowPlayer(),
         num_games=200
     )
     print("Tournament against PlanningPlayer:")
     play_tournament(
         player_a_factory_fn=lambda: NeuralPlayer(agents[best_agent_index]),
         player_b_factory_fn=lambda: PlanningPlayer(),
+        num_games=200
+    )
+    print("Tournament against baseline NeuralPlayer:")
+    play_tournament(
+        player_a_factory_fn=lambda: NeuralPlayer(agents[best_agent_index]),
+        player_b_factory_fn=lambda: NeuralPlayer(SimpleAgentCollection.load_default_agent()),
         num_games=200
     )
 

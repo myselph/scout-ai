@@ -40,10 +40,12 @@ class Agent(ABC):
             policy_optim: torch.optim.Optimizer,
             value_fn: nn.Module,
             value_fn_optim: torch.optim.Optimizer,
-            is_fixed_length: bool):
-        self.policy = policy
+            is_fixed_length: bool,
+            device: torch.device = torch.device("cpu")):
+        self.device = device
+        self.policy = policy.to(device)
         self.policy_optim = policy_optim
-        self.value_fn = value_fn
+        self.value_fn = value_fn.to(device)
         self.value_optim = value_fn_optim
         self.is_fixed_length = is_fixed_length
 
@@ -57,8 +59,7 @@ class Agent(ABC):
             net: nn.Module,
             states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         # A helper function to invoke the policy and value networks with the
-        # appropriate handling of variable or fixed length inputs (padding etc.)
-        # shape [batch].
+        # appropriate handling of variable or fixed length inputs (padding etc.)        
         assert states, "Must have at least one state"
         assert states[0].ndim == 1
         if self.is_fixed_length:
@@ -67,7 +68,7 @@ class Agent(ABC):
         else:
             padding_value = transformer_dict["<padding>"]
             lengths = torch.tensor([s.size(0)
-                                   for s in states], dtype=torch.long)
+                                   for s in states], dtype=torch.long, device=self.device)
             batch = torch.nn.utils.rnn.pad_sequence(
                 list(states), batch_first=True, padding_value=padding_value)
             padding_mask = batch == padding_value # [B, D]
@@ -76,15 +77,59 @@ class Agent(ABC):
     def compute_logprobs(
             self,
             post_move_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
-        # Takes either a list of [D] tensors (fixed length features) or a list
-        # of [L, D] tensors (variable length features), and returns logprobs of
-        # shape [batch].
-        # TODO: Consider supporting a list of list input as well and execute
-        # that in batched mode.
+        # Takes either a B-list of [D] tensors (fixed length features) or a
+        # B-list of [L] tensors (variable length features), and returns
+        # logprobs of shape [B].
         return torch.log_softmax(
             self.invoke_net(
                 self.policy,
-                post_move_states), dim=-1)  # [batch]
+                post_move_states), dim=-1)  # [B]
+
+    def compute_logprobs_and_entropy_batched(
+            self,
+            post_move_states_list: list[tuple[torch.Tensor, ...]],
+            action_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Batched version of compute_logprobs for use during training.
+        # Takes a list of A tuples, each containing B_i tensors of shape [D]
+        # (fixed length) or [L_ij] (variable length).
+        # action_indices: [A] - the chosen action index for each of the A samples.
+        # Returns:
+        #   new_logprobs: [A] - log prob of the chosen action per sample
+        #   entropies:    [A] - entropy of the policy distribution per sample
+        #
+        # Rather than A separate forward passes (one per sample), we concatenate
+        # all B_i action tensors into a single batch of size sum(B_i), run one
+        # forward pass, then split and softmax per segment. For the fixed-length
+        # case this requires no padding at all. For the variable-length case,
+        # sequences are padded to the global max length across all A*B_i actions,
+        # which in practice is close to the per-sample max since game states
+        # within a microbatch have similar lengths.
+        B_i_list = [len(states) for states in post_move_states_list]
+        all_states = [s for states in post_move_states_list for s in states]
+
+        if self.is_fixed_length:
+            batch = torch.stack(all_states)        # [sum(B_i), D]
+            logits = self.policy(batch)            # [sum(B_i)]
+        else:
+            padding_value = transformer_dict["<padding>"]
+            lengths = torch.tensor(
+                [s.size(0) for s in all_states], dtype=torch.long, device=self.device)
+            batch = torch.nn.utils.rnn.pad_sequence(
+                all_states, batch_first=True, padding_value=padding_value)
+            padding_mask = batch == padding_value  # [sum(B_i), L_max]
+            logits = self.policy(batch, padding_mask, lengths)  # [sum(B_i)]
+
+        per_sample_logits = torch.split(logits, B_i_list)
+
+        new_logprobs = []
+        entropies = []
+        for i, sample_logits in enumerate(per_sample_logits):
+            logprobs = torch.log_softmax(sample_logits, dim=0)  # [B_i]
+            new_logprobs.append(logprobs[action_indices[i]])
+            entropies.append(-(logprobs * torch.exp(logprobs)).sum())
+
+        return torch.stack(new_logprobs), torch.stack(entropies)
 
     def compute_values(
             self,
@@ -189,7 +234,6 @@ class SimplePolicyNet(nn.Module):
         # Output: [N, 1] -> squeeze to [1, N] or [N]
         return self.net(post_move_states).squeeze(1)
 
-
 class SimpleValueNet(nn.Module):
     def __init__(self, state_dim):
         super().__init__()
@@ -215,14 +259,16 @@ class SimpleAgent(Agent):
             state_dim: int,
             policy_lr: float,
             value_fn: nn.Module,
-            value_optim: torch.optim.Optimizer):
+            value_optim: torch.optim.Optimizer,
+            device: torch.device = torch.device("cpu")):
         policy = SimplePolicyNet(state_dim)
         super().__init__(
             policy=policy,
             policy_optim=torch.optim.Adam(policy.parameters(), lr=policy_lr),
             value_fn=value_fn,
             value_fn_optim=value_optim,
-            is_fixed_length=True
+            is_fixed_length=True,
+            device=device,
         )
 
     def featurize(
@@ -245,40 +291,42 @@ class SimpleAgent(Agent):
                 info_state.scores,
                 info_state.can_scout_and_show, inf))
 
-        return torch.unbind(neural_value_function.featurize(ssrs)[0], dim=0)
+        features = neural_value_function.featurize(ssrs)[0].to(self.device)
+        return torch.unbind(features, dim=0)
 
 
 class SimpleAgentCollection(AgentCollection):
     @staticmethod
-    def load_default_agent() -> Agent:
+    def load_default_agent(device: torch.device = torch.device("cpu")) -> Agent:
         base_dir = os.path.dirname(__file__)
         policy_path = os.path.join(base_dir, "simple_agent_weights", "simple_agent_0_it_79_skill_1.95.pth")
-        return SimpleAgentCollection.load_agents([policy_path])[0]
+        return SimpleAgentCollection.load_agents([policy_path], device=device)[0]
 
     @staticmethod
-    def create_agents(num_agents: int) -> list[Agent]:
+    def create_agents(num_agents: int, device: torch.device = torch.device("cpu")) -> list[Agent]:
         state_dim = 57
         policy_lr = 3e-3
         value_fn = SimpleValueNet(state_dim)
         value_optim = torch.optim.Adam(value_fn.parameters(), lr=1e-3)
-        return [SimpleAgent(state_dim, policy_lr, value_fn, value_optim)
+        return [SimpleAgent(state_dim, policy_lr, value_fn, value_optim, device)
                 for _ in range(num_agents)]
 
     @staticmethod
     def load_agents(
             policy_paths: list[str],
-            value_fn_path: str | None = "") -> list[Agent]:
+            value_fn_path: str | None = "",
+            device: torch.device = torch.device("cpu")) -> list[Agent]:
         # This function allows for loading agents from disk; this can be useful
         # for checkpointing/resumption, or simply to load a previously trained agent
         # for evaluation.
         # When used for evaluation, the value function is not used, so the
         # value_fn_path can be left empty, and the value function will be randomly
         # initialized.
-        agents = SimpleAgentCollection.create_agents(len(policy_paths))
+        agents = SimpleAgentCollection.create_agents(len(policy_paths), device)
         for i, policy_path in enumerate(policy_paths):
-            agents[i].policy.load_state_dict(torch.load(policy_path))
+            agents[i].policy.load_state_dict(torch.load(policy_path, map_location=device))
         if value_fn_path:
-            agents[0].value_fn.load_state_dict(torch.load(value_fn_path))
+            agents[0].value_fn.load_state_dict(torch.load(value_fn_path, map_location=device))
         return agents
 
     @staticmethod
@@ -388,14 +436,16 @@ class TransformerAgent(Agent):
             dim_ffd: int,
             policy_lr: float,
             value_fn: nn.Module,
-            value_optim: torch.optim.Optimizer):
+            value_optim: torch.optim.Optimizer,
+            device: torch.device = torch.device("cpu")):
         policy = TransformerPolicyNet(embed_dim, num_heads, dim_ffd, num_layers)
         super().__init__(
             policy=policy,
             policy_optim=torch.optim.Adam(policy.parameters(), lr=policy_lr),
             value_fn=value_fn,
             value_fn_optim=value_optim,
-            is_fixed_length=False
+            is_fixed_length=False,
+            device=device,
         )
 
     def featurize(self, info_states: tuple[InformationState, ...]) -> tuple[torch.Tensor, ...]:
@@ -443,14 +493,14 @@ class TransformerAgent(Agent):
             result.append(TD["</hand>"])
             result.append(TD["<eos>"])
 
-            results.append(torch.tensor(result, dtype=torch.int))
+            results.append(torch.tensor(result, dtype=torch.int, device=self.device))
 
         return tuple(results)
         
 
 class TransformerAgentCollection(AgentCollection):
     @staticmethod
-    def create_agents(num_agents: int) -> list[Agent]:
+    def create_agents(num_agents: int, device: torch.device = torch.device("cpu")) -> list[Agent]:
         embed_dim = 8
         num_heads = 2
         num_layers = 2
@@ -466,17 +516,19 @@ class TransformerAgentCollection(AgentCollection):
                 num_layers,
                 policy_lr,
                 value_fn,
-                value_optim) for _ in range(num_agents)]
+                value_optim,
+                device) for _ in range(num_agents)]
 
     @staticmethod
     def load_agents(
             policy_paths: list[str],
-            value_fn_path: str | None = "") -> list[Agent]:
-        agents = TransformerAgentCollection.create_agents(len(policy_paths))
+            value_fn_path: str | None = "",
+            device: torch.device = torch.device("cpu")) -> list[Agent]:
+        agents = TransformerAgentCollection.create_agents(len(policy_paths), device)
         for i, policy_path in enumerate(policy_paths):
-            agents[i].policy.load_state_dict(torch.load(policy_path))
+            agents[i].policy.load_state_dict(torch.load(policy_path, map_location=device))
         if value_fn_path:
-            agents[0].value_fn.load_state_dict(torch.load(value_fn_path))
+            agents[0].value_fn.load_state_dict(torch.load(value_fn_path, map_location=device))
         return agents
 
     @staticmethod
