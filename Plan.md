@@ -44,29 +44,52 @@ into account.
    in showing actual convergence (and divergence), but unfortunately is very
    slow. I also found that one needs a very high number of games played between
    players to get a stable ranking / skill level - about 500 - 1000 per player.
-1. WIP: Experiment with a larger population of agents to add diversity, and
+1. Done: Experiment with a larger population of agents to add diversity, and
    keeping the best old players around.
-   WIP: Baseline gets pretty good; quickly surpasses PlanningPlayer with the
-   best agent, other agents follow quickly. Exciting! I may need a new heuristic
-   baseline. E.g. one that has a curriculum of strategies. Or that takes into
-   account other player's running scores. Or just keep the best neural player
-   I've trained as new baseline.
-   When using 10 instead of 5 agents + larger networks (128:64:1): first PP beat @ 15, 8/10 @20. Then regression (back to 2), recovery, regression.
-   When using 10 instead of 5 agents + smaller network (32:8:1): first PP beat @ it 35; 5/10 beat it fter 50. Definitely slower progress, but gets there just the same.
-   For both, feels like similar progress to just 5 agents - not sure diversity helps (yet).
-   Kinda puzzled by the regressions. I expected the players to keep getting better,
-   but they top out around 1.9, then regress, then recover. It may be they hit
-   a natural limit with their architecture / feature set - I'm very curious now
-   to try a Transformer or RNN. Or better features such as "almost-long-run".
-   I have not yet tried keeping the best players around.
-1. Add a new baseline? I like PlanningPlayer because it is stable and easy to
-   understand; a neural player will require keeping weights and the exact
-   featurization around. My concern around PP as baseline is that two other
-   players A, B might have relative skills, but get the same win rates against
-   PP (under a reasonably large number of games) because there's an upper bound
-   of how much you can win against PP due to the inherent non-determinism.
+   Essentially I didn't notice a difference between using 5 or 10 or 20 players,
+   and keeping the best ones around or not, but I also didn't invest a ton of
+   time into it (e.g. I didn't keep injecting the best ones into training, I
+   just kept them for later eval). Getting actual skill level takes
+   a lot of time so I do it sparingly, so when the difference between two
+   approaches isn't significant, I may not notice real improvements. I feel like
+   I am at a point where the combination of a) good baseline performance in
+   PlanningPlayer and b) high degree of luck (ie noise) lead to a place that
+   makes it harder to make incremental progress and experimentation.
 1. Try Transformers. May benefit from initializing with imitation learning,
    unclear.
+    * Ported everything to GPUs and will try and run this in Colab on T4s.
+    * I need to make various changes to the existing Transformer featurization:
+        * Add learnable position and segment embeddings to card + table features
+        * Feed in features like scores, number of cards differently. Maybe not
+          even into Transformer, but into MLP that postprocesses Transformer
+          output.
+      Right now, I featurize states (converting info_state to torch.Tensor) in
+      collect_episodes; we need to featurize at this point anyway for inference,
+      so why not cache the result.
+      For Transformers, things get a bit messy here.
+      1. The tensor size is variable length
+      1. To support position and segment embeddings, we either
+        1. add channels so the featurized tensor is an LxC, not just an L tensor
+        1. add those channels in forward(), which is doable but feels messy -
+           need to analyze the input tensor to build those channel tensors.
+        1. just don't cache features at all, feeding Agent info_states instead of
+           torch.Tensors. But if Agent then does the featurization, I feel we
+           haven't really gained anything and just pushed the can down the road.
+           If Agent pushes featurization into forward(), we also need to push
+           batch construction, padding into forward() (because those happen after
+           featurization); which feels messy because splitting up the computed
+           logits + computing softmax's is done outside that function. The
+           advantage of pushing featurization far down is that it would give us
+           more flexibility to evolve the network; for example, instead of
+           just having a token sequence, we may chose to have only parts of the
+           input be a token sequence for transformers, while other parts are
+           sent to an MLP output head etc.
+      I will go with the channel approach for now. That seems like it requires
+      few changes, and may be useful even if I decide to push featurization farther
+      down.
+
+
+      
 
 ## Hyperparameter optimization & Learnings
 * Tried different batch sizes; 128 didn't work as well, 256 & 512 better / about

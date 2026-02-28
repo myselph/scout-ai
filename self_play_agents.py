@@ -21,17 +21,14 @@ class Agent(ABC):
     # fixed vs variable length inputs, different featurizations, etc.) and to
     # be usable for both inference and training operations.
 
-    # policy must have a forward() method that takes in
-    # 1. a [B, D] tensor where B is the number of moves, and D is the length of
-    #    either the feature vector (fixed length features) or the maximum
-    #    sequence length (variable length)
-    # 2. if variable length features: a [B, D] boolean padding mask tensor,
-    #    and a [B] long tensor of sequence lengths.
-    # The policy eithr returns a [B] tensor of logits (fixed length features) or
-    # a [B, D] tensor of logits (variable length features).
+    # policy must have a forward() method that takes in:
+    # - Fixed length: a [B, D] float tensor (B moves, D features), returns [B] logits.
+    # - Variable length: a [B, L, C] long tensor (B moves, L padded sequence length,
+    #   C channels) and a [B, L] boolean padding mask, returns [B] logits.
+    #   The C channels are: 0=token ID, 1=within-span card position (1-indexed, 0=none),
+    #   2=segment (0=none, 1=table, 2=hand).
     policy: nn.Module
-    # value_fn has the same interface as policy, but returns [B] independent
-    # value predictions.
+    # value_fn has the same interface as policy, but returns [B] value predictions.
     value_fn: nn.Module
 
     def __init__(
@@ -58,28 +55,25 @@ class Agent(ABC):
             self,
             net: nn.Module,
             states: tuple[torch.Tensor, ...]) -> torch.Tensor:
-        # A helper function to invoke the policy and value networks with the
-        # appropriate handling of variable or fixed length inputs (padding etc.)        
+        # Invokes policy or value_fn with appropriate batching.
+        # Fixed length: each state is [D]; stacked to [B, D].
+        # Variable length: each state is [L_i, C]; padded to [B, L_max, C],
+        # with a [B, L_max] boolean mask marking padding positions.
         assert states, "Must have at least one state"
-        assert states[0].ndim == 1
         if self.is_fixed_length:
             batch = torch.stack(states)  # [B, D]
-            return net(batch)  # [B]
+            return net(batch)            # [B]
         else:
-            padding_value = transformer_dict["<padding>"]
-            lengths = torch.tensor([s.size(0)
-                                   for s in states], dtype=torch.long, device=self.device)
             batch = torch.nn.utils.rnn.pad_sequence(
-                list(states), batch_first=True, padding_value=padding_value)
-            padding_mask = batch == padding_value # [B, D]
-            return net(batch, padding_mask, lengths)  # [B]            
+                list(states), batch_first=True, padding_value=PADDING_IDX)
+            padding_mask = batch[:, :, 0] == PADDING_IDX  # [B, L_max]
+            return net(batch, padding_mask)                # [B]
 
     def compute_logprobs(
             self,
             post_move_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
-        # Takes either a B-list of [D] tensors (fixed length features) or a
-        # B-list of [L] tensors (variable length features), and returns
-        # logprobs of shape [B].
+        # Takes a B-tuple of [D] tensors (fixed length) or [L, C] tensors
+        # (variable length), and returns logprobs of shape [B].
         return torch.log_softmax(
             self.invoke_net(
                 self.policy,
@@ -92,7 +86,7 @@ class Agent(ABC):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Batched version of compute_logprobs for use during training.
         # Takes a list of A tuples, each containing B_i tensors of shape [D]
-        # (fixed length) or [L_ij] (variable length).
+        # (fixed length) or [L_ij, C] (variable length).
         # action_indices: [A] - the chosen action index for each of the A samples.
         # Returns:
         #   new_logprobs: [A] - log prob of the chosen action per sample
@@ -112,13 +106,10 @@ class Agent(ABC):
             batch = torch.stack(all_states)        # [sum(B_i), D]
             logits = self.policy(batch)            # [sum(B_i)]
         else:
-            padding_value = transformer_dict["<padding>"]
-            lengths = torch.tensor(
-                [s.size(0) for s in all_states], dtype=torch.long, device=self.device)
             batch = torch.nn.utils.rnn.pad_sequence(
-                all_states, batch_first=True, padding_value=padding_value)
-            padding_mask = batch == padding_value  # [sum(B_i), L_max]
-            logits = self.policy(batch, padding_mask, lengths)  # [sum(B_i)]
+                all_states, batch_first=True, padding_value=PADDING_IDX)
+            padding_mask = batch[:, :, 0] == PADDING_IDX  # [sum(B_i), L_max]
+            logits = self.policy(batch, padding_mask)        # [sum(B_i)]
 
         per_sample_logits = torch.split(logits, B_i_list)
 
@@ -134,10 +125,8 @@ class Agent(ABC):
     def compute_values(
             self,
             pre_move_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
-        # Takes a tensor of size [B, D] (fixed length features) or [B, L, D]
-        # (variable length features), and returns values of shape [B].
-        # For variable length features, padding_mask is boolean [B, L], and
-        # lengths is long [B].
+        # Takes a B-tuple of [D] tensors (fixed length) or [L, C] tensors
+        # (variable length), and returns values of shape [B].
         return self.invoke_net(
             self.value_fn,
             pre_move_states)
@@ -345,8 +334,10 @@ class SimpleAgentCollection(AgentCollection):
 # eventually taking history (which cards have been played) into account.
 # A secondary hope is that having other architectures in the mix adds diversity.
 ##############################################################################
+PADDING_IDX = 0  # shared by pad_sequence, embedding tables, and featurize
 dict_tokens = [
-    "<padding>",
+    "<padding>",  # must be at index PADDING_IDX
+    "<CLS>",
     "<num_players>",
     "</num_players>",
     "<num_cards>",
@@ -367,6 +358,7 @@ dict_tokens = [
 ]
 
 transformer_dict = {token: i for i, token in enumerate(dict_tokens)}
+assert transformer_dict["<padding>"] == PADDING_IDX
 next_index = len(transformer_dict)
 for i in range(1,11):
     transformer_dict[f"<card{i}>"] = next_index
@@ -392,9 +384,14 @@ def map_int_to_tf_dict(i: int) -> int:
 # forward below with a 1xN pre_move_stat and a 2xM post_move_state where both
 # rows of the post_move_state are identical, I get different logits.
 class TransformerPolicyNet(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int):
+    def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int,
+                 max_card_pos: int = 45):
         super().__init__()
-        self.embedding = nn.Embedding(len(transformer_dict), embed_dim)
+        self.token_embedding = nn.Embedding(len(transformer_dict), embed_dim)
+        # padding_idx=PADDING_IDX keeps the zero vector for non-card tokens and
+        # excludes them from gradient updates.
+        self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
+        self.segment_embedding = nn.Embedding(3, embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -402,29 +399,36 @@ class TransformerPolicyNet(nn.Module):
 
     def forward(
             self,
-            post_move_states: torch.Tensor,
-            padding_mask: torch.Tensor,
-            lengths: torch.Tensor) -> torch.Tensor:
-        embedded = self.embedding(post_move_states)  # [B, D, E]
-        transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, D, E]
-        last_embeddings = transformed[torch.arange(transformed.size(0)), lengths - 1, :]  # [B, E]
-        return self.output_layer(last_embeddings).squeeze(1)  # [B]        
+            post_move_states: torch.Tensor,  # [B, L, C]
+            padding_mask: torch.Tensor) -> torch.Tensor:
+        embedded = (self.token_embedding(post_move_states[:, :, 0])
+                  + self.card_pos_embedding(post_move_states[:, :, 1])
+                  + self.segment_embedding(post_move_states[:, :, 2]))  # [B, L, E]
+        transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
+        cls_embeddings = transformed[:, 0, :]  # [B, E]
+        return self.output_layer(cls_embeddings).squeeze(1)  # [B]
 
 
 class TransformerValueNet(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int):
+    def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int,
+                 max_card_pos: int = 45):
         super().__init__()
-        self.embedding = nn.Embedding(len(transformer_dict), embed_dim)
+        self.token_embedding = nn.Embedding(len(transformer_dict), embed_dim)
+        self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
+        self.segment_embedding = nn.Embedding(3, embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
         self.output_layer = nn.Linear(embed_dim, 1)
 
-    def forward(self, states: torch.Tensor, padding_mask: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        embedded = self.embedding(states)  # [M, D_embed]        
-        transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [M, D_embed]
-        last_embeddings = transformed[torch.arange(transformed.size(0)), lengths - 1, :]  # [B, E]
-        return self.output_layer(last_embeddings).squeeze(1)  # [B]
+    def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+        # states: [B, L, C]
+        embedded = (self.token_embedding(states[:, :, 0])
+                  + self.card_pos_embedding(states[:, :, 1])
+                  + self.segment_embedding(states[:, :, 2]))  # [B, L, E]
+        transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
+        cls_embeddings = transformed[:, 0, :]  # [B, E]
+        return self.output_layer(cls_embeddings).squeeze(1)  # [B]
 
 
 class TransformerAgent(Agent):
@@ -437,8 +441,9 @@ class TransformerAgent(Agent):
             policy_lr: float,
             value_fn: nn.Module,
             value_optim: torch.optim.Optimizer,
-            device: torch.device = torch.device("cpu")):
-        policy = TransformerPolicyNet(embed_dim, num_heads, dim_ffd, num_layers)
+            device: torch.device = torch.device("cpu"),
+            max_card_pos: int = 12):
+        policy = TransformerPolicyNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
         super().__init__(
             policy=policy,
             policy_optim=torch.optim.Adam(policy.parameters(), lr=policy_lr),
@@ -449,51 +454,60 @@ class TransformerAgent(Agent):
         )
 
     def featurize(self, info_states: tuple[InformationState, ...]) -> tuple[torch.Tensor, ...]:
+        # Returns one [L, C] long tensor per info_state, where L is the sequence
+        # length and C=3 channels are: token ID, within-span card position
+        # (1-indexed, 0 for non-card tokens), segment (0=none, 1=table, 2=hand).
         # Not yet added: history, or some subset of it such as discarded cards
         # and known card -> opponent assignments.
-        # TODO: Positional embeddings so order matters.
         results: list[torch.Tensor] = []
-        TD: dict[str,int] = transformer_dict  # to make things more readable
-        
+        TD: dict[str, int] = transformer_dict
+
         for info_state in info_states:
-            num_cards_rot = info_state.num_cards[info_state.current_player:] + \
-                info_state.num_cards[:info_state.current_player]
-            scores_rot = info_state.scores[info_state.current_player:] + \
-                info_state.scores[:info_state.current_player]
-            can_scout_and_show_rot = info_state.can_scout_and_show[info_state.current_player:] + \
-                info_state.can_scout_and_show[:info_state.current_player]
-            
-            result: list[int] = []
-            result.append(TD["<num_players>"])
-            result.append(map_int_to_tf_dict(info_state.num_players))
-            result.append(TD["</num_players>"])
-            result.append(TD["<num_cards>"])
+            num_cards_rot = (info_state.num_cards[info_state.current_player:] +
+                             info_state.num_cards[:info_state.current_player])
+            scores_rot = (info_state.scores[info_state.current_player:] +
+                          info_state.scores[:info_state.current_player])
+            can_scout_and_show_rot = (info_state.can_scout_and_show[info_state.current_player:] +
+                                      info_state.can_scout_and_show[:info_state.current_player])
+
+            tokens:   list[int] = []
+            card_pos: list[int] = []
+            segments: list[int] = []
+
+            def append_token(tok: int, pos: int = PADDING_IDX, seg: int = PADDING_IDX) -> None:
+                tokens.append(tok)
+                card_pos.append(pos)
+                segments.append(seg)
+
+            append_token(TD["<CLS>"])
+            append_token(TD["<num_players>"])
+            append_token(map_int_to_tf_dict(info_state.num_players))
+            append_token(TD["</num_players>"])
+            append_token(TD["<num_cards>"])
             for i in num_cards_rot:
-                result.append(map_int_to_tf_dict(i))
-            result.append(TD["</num_cards>"])
-            result.append(TD["<scores>"])
+                append_token(map_int_to_tf_dict(i))
+            append_token(TD["</num_cards>"])
+            append_token(TD["<scores>"])
             for i in scores_rot:
-                result.append(map_int_to_tf_dict(i))
-            result.append(TD["</scores>"])
-            result.append(TD["<scout_and_show>"])
+                append_token(map_int_to_tf_dict(i))
+            append_token(TD["</scores>"])
+            append_token(TD["<scout_and_show>"])
             for i in can_scout_and_show_rot:
-                if i:
-                    result.append(TD["True"])
-                else:
-                    result.append(TD["False"])
+                append_token(TD["True"] if i else TD["False"])
+            append_token(TD["</scout_and_show>"])
+            append_token(TD["<table>"])
+            for pos, c in enumerate(info_state.table):
+                append_token(map_card_to_tf_dict(c[0]), pos + 1, 1)
+            append_token(TD["</table>"])
+            append_token(TD["<hand>"])
+            for pos, c in enumerate(info_state.hand):
+                append_token(map_card_to_tf_dict(c[0]), pos + 1, 2)
+            append_token(TD["</hand>"])
+            append_token(TD["<eos>"])
 
-            result.append(TD["</scout_and_show>"])
-            result.append(TD["<table>"])
-            for c in info_state.table:
-                result.append(map_card_to_tf_dict(c[0]))
-            result.append(TD["</table>"])
-            result.append(TD["<hand>"])
-            for c in info_state.hand:
-                result.append(map_card_to_tf_dict(c[0]))
-            result.append(TD["</hand>"])
-            result.append(TD["<eos>"])
-
-            results.append(torch.tensor(result, dtype=torch.int, device=self.device))
+            result = torch.tensor(
+                list(zip(tokens, card_pos, segments)), dtype=torch.long, device=self.device)
+            results.append(result)
 
         return tuple(results)
         
@@ -501,13 +515,14 @@ class TransformerAgent(Agent):
 class TransformerAgentCollection(AgentCollection):
     @staticmethod
     def create_agents(num_agents: int, device: torch.device = torch.device("cpu")) -> list[Agent]:
-        embed_dim = 8
-        num_heads = 2
-        num_layers = 2
+        embed_dim = 64
+        num_heads = 4
+        num_layers = 4
         dim_ffd = 32
-        policy_lr = 3e-3
-        value_fn = TransformerValueNet(embed_dim, num_heads, dim_ffd, num_layers)
-        value_optim = torch.optim.Adam(value_fn.parameters(), lr=1e-3)
+        max_card_pos = 45
+        policy_lr = 1e-4
+        value_fn = TransformerValueNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
+        value_optim = torch.optim.Adam(value_fn.parameters(), lr=3e-4)
         return [
             TransformerAgent(
                 embed_dim,
@@ -517,7 +532,8 @@ class TransformerAgentCollection(AgentCollection):
                 policy_lr,
                 value_fn,
                 value_optim,
-                device) for _ in range(num_agents)]
+                device,
+                max_card_pos) for _ in range(num_agents)]
 
     @staticmethod
     def load_agents(
