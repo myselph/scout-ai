@@ -338,21 +338,8 @@ PADDING_IDX = 0  # shared by pad_sequence, embedding tables, and featurize
 dict_tokens = [
     "<padding>",  # must be at index PADDING_IDX
     "<CLS>",
-    "<num_players>",
-    "</num_players>",
-    "<num_cards>",
-    "</num_cards>",
-    "<scores>",
-    "</scores>",
-    "<scout_and_show>",
-    "</scout_and_show>",
-    "<table>",
-    "</table>",
-    "<hand>",
-    "</hand>",
     "True",
     "False",
-    "<eos>",
     "<too_small>",
     "<too_large>",
 ]
@@ -379,6 +366,17 @@ def map_int_to_tf_dict(i: int) -> int:
     else:
         return transformer_dict[f"int_{i}"]
 
+SEGMENT_INDICES = {
+    'PADDING': 0,
+    'CLS' : 1,
+    'HAND': 2,
+    'TABLE': 3,
+    'SCORES': 4,
+    'CAN_SCOUT_AND_SHOW': 5,
+    'NUM_CARDS' : 6,
+    'NUM_PLAYERS': 7
+}
+
 
 # TODO: I have some dimenion related bug in there. I found that when I call
 # forward below with a 1xN pre_move_stat and a 2xM post_move_state where both
@@ -391,7 +389,7 @@ class TransformerPolicyNet(nn.Module):
         # padding_idx=PADDING_IDX keeps the zero vector for non-card tokens and
         # excludes them from gradient updates.
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
-        self.segment_embedding = nn.Embedding(3, embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
+        self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -415,7 +413,7 @@ class TransformerValueNet(nn.Module):
         super().__init__()
         self.token_embedding = nn.Embedding(len(transformer_dict), embed_dim)
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
-        self.segment_embedding = nn.Embedding(3, embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
+        self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -442,7 +440,7 @@ class TransformerAgent(Agent):
             value_fn: nn.Module,
             value_optim: torch.optim.Optimizer,
             device: torch.device = torch.device("cpu"),
-            max_card_pos: int = 12):
+            max_card_pos: int = 45):
         policy = TransformerPolicyNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
         super().__init__(
             policy=policy,
@@ -479,31 +477,18 @@ class TransformerAgent(Agent):
                 card_pos.append(pos)
                 segments.append(seg)
 
-            append_token(TD["<CLS>"])
-            append_token(TD["<num_players>"])
-            append_token(map_int_to_tf_dict(info_state.num_players))
-            append_token(TD["</num_players>"])
-            append_token(TD["<num_cards>"])
-            for i in num_cards_rot:
-                append_token(map_int_to_tf_dict(i))
-            append_token(TD["</num_cards>"])
-            append_token(TD["<scores>"])
-            for i in scores_rot:
-                append_token(map_int_to_tf_dict(i))
-            append_token(TD["</scores>"])
-            append_token(TD["<scout_and_show>"])
-            for i in can_scout_and_show_rot:
-                append_token(TD["True"] if i else TD["False"])
-            append_token(TD["</scout_and_show>"])
-            append_token(TD["<table>"])
-            for pos, c in enumerate(info_state.table):
-                append_token(map_card_to_tf_dict(c[0]), pos + 1, 1)
-            append_token(TD["</table>"])
-            append_token(TD["<hand>"])
+            append_token(TD["<CLS>"], 0, SEGMENT_INDICES['CLS'])
             for pos, c in enumerate(info_state.hand):
-                append_token(map_card_to_tf_dict(c[0]), pos + 1, 2)
-            append_token(TD["</hand>"])
-            append_token(TD["<eos>"])
+                append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['HAND'])
+            for pos, c in enumerate(info_state.table):
+                append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['TABLE'])
+            for pos, score in enumerate(scores_rot):
+                append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['SCORES'])
+            for pos, csas in enumerate(can_scout_and_show_rot):
+                append_token(TD["True"] if csas else TD["False"], pos + 1, SEGMENT_INDICES['CAN_SCOUT_AND_SHOW'])
+            for pos, nc in enumerate(num_cards_rot):
+                append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['NUM_CARDS'])
+            append_token(map_int_to_tf_dict(info_state.num_players), 0, SEGMENT_INDICES['NUM_PLAYERS'])
 
             result = torch.tensor(
                 list(zip(tokens, card_pos, segments)), dtype=torch.long, device=self.device)

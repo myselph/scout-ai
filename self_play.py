@@ -42,6 +42,12 @@ parser.add_argument(
     action='store_true',
     help='Use transformer-based agents instead of simple feedforward agents'
 )
+parser.add_argument(
+    '--transformer_norm_first',
+    action='store_true',
+    help='Use norm_first in Transformer'
+)
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")

@@ -55,40 +55,22 @@ into account.
    I am at a point where the combination of a) good baseline performance in
    PlanningPlayer and b) high degree of luck (ie noise) lead to a place that
    makes it harder to make incremental progress and experimentation.
-1. Try Transformers. May benefit from initializing with imitation learning,
-   unclear.
-    * Ported everything to GPUs and will try and run this in Colab on T4s.
-    * I need to make various changes to the existing Transformer featurization:
-        * Add learnable position and segment embeddings to card + table features
-        * Feed in features like scores, number of cards differently. Maybe not
-          even into Transformer, but into MLP that postprocesses Transformer
-          output.
-      Right now, I featurize states (converting info_state to torch.Tensor) in
-      collect_episodes; we need to featurize at this point anyway for inference,
-      so why not cache the result.
-      For Transformers, things get a bit messy here.
-      1. The tensor size is variable length
-      1. To support position and segment embeddings, we either
-        1. add channels so the featurized tensor is an LxC, not just an L tensor
-        1. add those channels in forward(), which is doable but feels messy -
-           need to analyze the input tensor to build those channel tensors.
-        1. just don't cache features at all, feeding Agent info_states instead of
-           torch.Tensors. But if Agent then does the featurization, I feel we
-           haven't really gained anything and just pushed the can down the road.
-           If Agent pushes featurization into forward(), we also need to push
-           batch construction, padding into forward() (because those happen after
-           featurization); which feels messy because splitting up the computed
-           logits + computing softmax's is done outside that function. The
-           advantage of pushing featurization far down is that it would give us
-           more flexibility to evolve the network; for example, instead of
-           just having a token sequence, we may chose to have only parts of the
-           input be a token sequence for transformers, while other parts are
-           sent to an MLP output head etc.
-      I will go with the channel approach for now. That seems like it requires
-      few changes, and may be useful even if I decide to push featurization farther
-      down.
+1. Transformer TODO:
+   1. Fix this error: /content/scout-ai/self_play_agents.py:395: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.transformer = nn.TransformerEncoder(
+   1. Diable microbatching when running on GPUs, or use larger batches? Not sure   
+   it hurts performance. Training takes 100s on 5 batches of ~600 transitions each; that's
+   30 transitions per second, and a microbatch is 32. So 1s, seems long enough.
+   1. Free GPU memory, it's pretty high for very small nets.
+   1. Get rid of non-batched logprob, and see if invoke_net still needed. The
+   Agent class feels a bit overcomplete.
+   1. Try different learning rates.
 
-
+## Transformer experiments
+1. First semi-successful runs: 3-channel featurization with 3 segments, and
+   card positions. Embed ints (instead of computing their embeddings); no score, num cards position or segment embeddings. 1e-4
+   lr, E=64, H=4, L=4, FFD=32. After 10 iterations, stuck at 11 - 12 mvoes/game,
+   and a skill level of 0.1 (PP=1.0).
       
 
 ## Hyperparameter optimization & Learnings
