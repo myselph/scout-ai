@@ -11,27 +11,8 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = [
-    "common",
-    "evaluation",
-    "featurize_numpy",
-    "game_state",
-    "ismcts_player",
-    "main",
-    "merge_pickles",
-    "neural_value_function",
-    "numpy_neural_player",
-    "players",
-    "power_analysis",
-    "self_play",
-    "self_play_agents",
-    "test_all",
-    "train_neural_value_function"
-]
-packages = [
-    "simple_agent_weights"
-]
+packages = ["scout_engine", "scout_engine.simple_agent_weights"]
 
 [tool.setuptools.package-data]
-simple_agent_weights = ["*.pth", "*.md"]
+"scout_engine.simple_agent_weights" = ["*.pth", "*.npz", "*.md"]
 

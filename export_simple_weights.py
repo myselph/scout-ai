@@ -18,7 +18,7 @@ def export(pth_path: str, npz_path: str) -> None:
 
 if __name__ == "__main__":
     base_dir = os.path.dirname(__file__)
-    weights_dir = os.path.join(base_dir, "simple_agent_weights")
+    weights_dir = os.path.join(base_dir, "scout_engine", "simple_agent_weights")
     for fname in os.listdir(weights_dir):
         if fname.endswith(".pth"):
             stem = fname[:-4]
