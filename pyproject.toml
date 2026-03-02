@@ -14,11 +14,13 @@ dependencies = [
 py-modules = [
     "common",
     "evaluation",
+    "featurize_numpy",
     "game_state",
     "ismcts_player",
     "main",
     "merge_pickles",
     "neural_value_function",
+    "numpy_neural_player",
     "players",
     "power_analysis",
     "self_play",
