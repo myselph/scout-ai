@@ -292,11 +292,15 @@ class SimpleAgentCollection(AgentCollection):
         return SimpleAgentCollection.load_agents([policy_path], device=device)[0]
 
     @staticmethod
-    def create_agents(num_agents: int, device: torch.device = torch.device("cpu")) -> list[Agent]:
+    def create_agents(num_agents: int, device: torch.device = torch.device("cpu"),
+                      policy_lr: float | None = None, value_lr: float | None = None) -> list[Agent]:
         state_dim = 57
-        policy_lr = 3e-3
+        if policy_lr is None:
+            policy_lr = 3e-3
+        if value_lr is None:
+            value_lr = 1e-3
         value_fn = SimpleValueNet(state_dim)
-        value_optim = torch.optim.Adam(value_fn.parameters(), lr=1e-3)
+        value_optim = torch.optim.Adam(value_fn.parameters(), lr=value_lr)
         return [SimpleAgent(state_dim, policy_lr, value_fn, value_optim, device)
                 for _ in range(num_agents)]
 
@@ -499,15 +503,19 @@ class TransformerAgent(Agent):
 
 class TransformerAgentCollection(AgentCollection):
     @staticmethod
-    def create_agents(num_agents: int, device: torch.device = torch.device("cpu")) -> list[Agent]:
+    def create_agents(num_agents: int, device: torch.device = torch.device("cpu"),
+                      policy_lr: float | None = None, value_lr: float | None = None) -> list[Agent]:
         embed_dim = 64
         num_heads = 4
         num_layers = 4
         dim_ffd = 32
         max_card_pos = 45
-        policy_lr = 1e-4
+        if policy_lr is None:
+            policy_lr = 1e-4
+        if value_lr is None:
+            value_lr = 3e-4
         value_fn = TransformerValueNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
-        value_optim = torch.optim.Adam(value_fn.parameters(), lr=3e-4)
+        value_optim = torch.optim.Adam(value_fn.parameters(), lr=value_lr)
         return [
             TransformerAgent(
                 embed_dim,

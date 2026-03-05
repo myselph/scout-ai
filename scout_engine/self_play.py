@@ -1,5 +1,7 @@
 from __future__ import annotations
 import copy
+import glob as glob_module
+import os
 import random
 import torch
 import time
@@ -46,6 +48,25 @@ parser.add_argument(
     '--transformer_norm_first',
     action='store_true',
     help='Use norm_first in Transformer'
+)
+parser.add_argument(
+    '--policy_lr',
+    type=float,
+    help='Learning rate for the policy network',
+    default=None
+)
+parser.add_argument(
+    '--value_lr',
+    type=float,
+    help='Learning rate for the value network',
+    default=None
+)
+parser.add_argument(
+    '--resume_dir',
+    type=str,
+    help='Directory containing .pth files to resume training from; '
+         'derives number of agents from policy files found there',
+    default=None
 )
 
 
@@ -373,18 +394,38 @@ def train(
     episodes_per_iter: int,
     num_players: int,
     minibatch_size: int = 512,
-    epochs: int = 2
+    epochs: int = 2,
+    policy_lr: float | None = None,
+    value_lr: float | None = None,
+    resume_dir: str | None = None,
 ):
     agents = []
     # Number of agents we train in an iteration.
     num_agents_train = num_players
     # We keep copies of the best ones.
-    num_best_agents = int(0.2 * num_agents_train)    
-    num_best_agents = 0    
-    if args.use_transformer:
-        agents = TransformerAgentCollection.create_agents(num_agents_train, device)
+    num_best_agents = int(0.2 * num_agents_train)
+    num_best_agents = 0
+    if resume_dir is not None:
+        all_pth = sorted(glob_module.glob(os.path.join(resume_dir, '*.pth')))
+        policy_paths = [p for p in all_pth if not p.endswith('_value_fn.pth')]
+        value_fn_paths = [p for p in all_pth if p.endswith('_value_fn.pth')]
+        value_fn_path = value_fn_paths[-1] if value_fn_paths else None
+        num_agents_train = len(policy_paths)
+        if num_agents_train < num_players:
+            raise ValueError(
+                f"resume_dir has {num_agents_train} policy files but num_players={num_players}; "
+                "need at least num_players agents to run self-play"
+            )
+        if args.use_transformer:
+            agents = TransformerAgentCollection.load_agents(policy_paths, value_fn_path, device)
+        else:
+            agents = SimpleAgentCollection.load_agents(policy_paths, value_fn_path, device)
+        print(f"Resumed {num_agents_train} agents from {resume_dir} "
+              f"(value fn: {value_fn_path})")
+    elif args.use_transformer:
+        agents = TransformerAgentCollection.create_agents(num_agents_train, device, policy_lr=policy_lr, value_lr=value_lr)
     else:
-        agents = SimpleAgentCollection.create_agents(num_agents_train, device)
+        agents = SimpleAgentCollection.create_agents(num_agents_train, device, policy_lr=policy_lr, value_lr=value_lr)
 
     best_agents: dict[float, Agent] = {}
 
@@ -461,6 +502,9 @@ def main():
         num_players=num_players,
         minibatch_size=args.batch_size,
         epochs=args.epochs,
+        policy_lr=args.policy_lr,
+        value_lr=args.value_lr,
+        resume_dir=args.resume_dir,
     )
 
     # Find the best agent.

@@ -343,3 +343,8 @@ self play.
     over flat Monte Carlo). Next up, neural policies. PPO. Reward hacking problems.
     Need to rank players (Plackett-Luce: like Elo, but for multi-player, and batch-wise, not online), also how to track progress (rewards / loss not
     helpful).
+    1. Neural stuff observations
+        1. Basic self-play; small neural net helpful to find right hyperparams
+        1. Strategy specific to number of players; may be best to train N networks instead of one.
+        1. Transformers very slow, big, costly to train and thus hard to experiment with.
+        
