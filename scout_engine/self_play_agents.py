@@ -396,7 +396,7 @@ class TransformerPolicyNet(nn.Module):
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=False), num_layers)
+                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
         self.output_layer = nn.Linear(embed_dim, 1)
 
     def forward(
@@ -420,7 +420,7 @@ class TransformerValueNet(nn.Module):
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=False), num_layers)
+                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
         self.output_layer = nn.Linear(embed_dim, 1)
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
