@@ -329,8 +329,9 @@ def ppo_update(
     NOTE: all agents share value_fn, so value_optimizer updates it globally.
     """
 
-    for agent_id, data in data_by_agent.items():
+    for agent_id in list(data_by_agent.keys()):
         print(f"training agent {agent_id}")
+        data = data_by_agent.pop(agent_id)
         pre_move_states = data["pre_move_states"]
         actions = data["actions"]
         post_move_states_list = data["post_move_states_list"]
@@ -378,6 +379,10 @@ def ppo_update(
                 # Step optimizer after full minibatch
                 agents[agent_id].policy_optim.step()
                 agents[agent_id].value_optim.step()
+
+        del pre_move_states, post_move_states_list, data
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 # ----------------------------------------------------------------------
@@ -444,6 +449,8 @@ def train(
         # 2. Flatten storage and compute GAE
         data = flatten_trajectories(trajectories)
         del trajectories
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # 3. PPO update
         ppo_update(
@@ -454,6 +461,8 @@ def train(
             microbatch_size=64
         )
         del data
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         t_ppo_update = time.time()
         print(f"PPO update took {t_ppo_update - t_collect_episodes:.2f} seconds.")
 

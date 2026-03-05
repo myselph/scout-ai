@@ -61,11 +61,11 @@ class Agent(ABC):
         # with a [B, L_max] boolean mask marking padding positions.
         assert states, "Must have at least one state"
         if self.is_fixed_length:
-            batch = torch.stack(states)  # [B, D]
-            return net(batch)            # [B]
+            batch = torch.stack(states).to(self.device)  # [B, D]
+            return net(batch)                             # [B]
         else:
             batch = torch.nn.utils.rnn.pad_sequence(
-                list(states), batch_first=True, padding_value=PADDING_IDX)
+                list(states), batch_first=True, padding_value=PADDING_IDX).to(self.device)
             padding_mask = batch[:, :, 0] == PADDING_IDX  # [B, L_max]
             return net(batch, padding_mask)                # [B]
 
@@ -103,13 +103,13 @@ class Agent(ABC):
         all_states = [s for states in post_move_states_list for s in states]
 
         if self.is_fixed_length:
-            batch = torch.stack(all_states)        # [sum(B_i), D]
-            logits = self.policy(batch)            # [sum(B_i)]
+            batch = torch.stack(all_states).to(self.device)  # [sum(B_i), D]
+            logits = self.policy(batch)                       # [sum(B_i)]
         else:
             batch = torch.nn.utils.rnn.pad_sequence(
-                all_states, batch_first=True, padding_value=PADDING_IDX)
-            padding_mask = batch[:, :, 0] == PADDING_IDX  # [sum(B_i), L_max]
-            logits = self.policy(batch, padding_mask)        # [sum(B_i)]
+                all_states, batch_first=True, padding_value=PADDING_IDX).to(self.device)
+            padding_mask = batch[:, :, 0] == PADDING_IDX       # [sum(B_i), L_max]
+            logits = self.policy(batch, padding_mask)           # [sum(B_i)]
 
         per_sample_logits = torch.split(logits, B_i_list)
 
@@ -280,7 +280,7 @@ class SimpleAgent(Agent):
                 info_state.scores,
                 info_state.can_scout_and_show, inf))
 
-        features = neural_value_function.featurize(ssrs)[0].to(self.device)
+        features = neural_value_function.featurize(ssrs)[0]
         return torch.unbind(features, dim=0)
 
 
@@ -507,7 +507,7 @@ class TransformerAgent(Agent):
             #append_token(map_int_to_tf_dict(info_state.num_players), 0, SEGMENT_INDICES['NUM_PLAYERS'])
 
             result = torch.tensor(
-                list(zip(tokens, card_pos, segments, ordinals)), dtype=torch.long, device=self.device)
+                list(zip(tokens, card_pos, segments, ordinals)), dtype=torch.long)
             results.append(result)
 
         return tuple(results)
