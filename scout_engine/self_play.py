@@ -45,11 +45,6 @@ parser.add_argument(
     help='Use transformer-based agents instead of simple feedforward agents'
 )
 parser.add_argument(
-    '--transformer_norm_first',
-    action='store_true',
-    help='Use norm_first in Transformer'
-)
-parser.add_argument(
     '--policy_lr',
     type=float,
     help='Learning rate for the policy network',
@@ -456,7 +451,7 @@ def train(
             data,
             minibatch_size,
             epochs,
-            microbatch_size=32
+            microbatch_size=128
         )
         del data
         t_ppo_update = time.time()
