@@ -451,7 +451,7 @@ def train(
             data,
             minibatch_size,
             epochs,
-            microbatch_size=128
+            microbatch_size=64
         )
         del data
         t_ppo_update = time.time()
