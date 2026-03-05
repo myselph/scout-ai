@@ -78,10 +78,25 @@ into account.
    players; I hope this speeds things up and simplifies the problem. With an
    lr of 3-e3 for both policy and value net, 5 players, I got to ~6-7 moves/game
    after just 5 iterations, and a skill level of 0.25. But it then gets stuck at
-   that skill level (or at least moves/game).
-1. WIP: PlanningPlayer has access to the score delta for each move, which is
-   a very strong signal to distinguish moves. This can be inferred from the
-   raw score distr, but may be a useful extra signal).
+   that skill level (or at least moves/game) again.
+1. I tried to add back scores, and embed both cards + scores by using their
+   ordinal values (just adding c*ones*card_value or *score_value to the
+   embedding); this may have helped with convergence but the ultimate skill is
+   the same at 0.25.
+1. Gemini suggests to either expand the ordinal value to E via a linear
+   projection, or using sinusoids instead (because there is something about
+   shifting - there exists a linear projection to map sin(v) to sin(v+k)
+   independent of v, so relative relationships (eg that 2-3 and 7-8 are similar)
+   can be learnt. Didn't really get that but maybe worth a try)
+1. I suspect, but that's a pure guess, that the Transformer does not yet learn
+   the relevance of, or concept of groups and runs. Maybe that requires a larger
+   network, maybe pre-training. I don't want to give up yet and will spend a bit
+   more time on feature engineering, and paid for GPU time. But it seems to be
+   pretty challenging to replicate the simple logic of group and run detection.
+   I could hand in these features to a Transformer, or do more advanced feature
+   engineering (eg hand strength if parts of the hand are played), but that 
+   goes against the very reason why I use Transformers in the first place - to
+   get to some magic "hand evaluator" that just works.
       
 
 ## Hyperparameter optimization & Learnings
