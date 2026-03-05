@@ -69,8 +69,19 @@ into account.
 ## Transformer experiments
 1. First semi-successful runs: 3-channel featurization with 3 segments, and
    card positions. Embed ints (instead of computing their embeddings); no score, num cards position or segment embeddings. 1e-4
-   lr, E=64, H=4, L=4, FFD=32. After 10 iterations, stuck at 11 - 12 mvoes/game,
-   and a skill level of 0.1 (PP=1.0).
+   lr, E=64, H=4, L=4, FFD=32. After 10 iterations, stuck at 11 - 12 moves/game,
+   and a skill level of 0.1 (PP=1.0). It eventually (after 30-40 iterations)
+   gets stuck at 8 moves / game, and ~0.25 skill level tops. Higher learning
+   rates + resuming from that point did not help.
+1. To play with hyperparameters and get an idea for convergence, I removed all
+   features but hand and table (ie no scores, number of cards, s&s), number of
+   players; I hope this speeds things up and simplifies the problem. With an
+   lr of 3-e3 for both policy and value net, 5 players, I got to ~6-7 moves/game
+   after just 5 iterations, and a skill level of 0.25. But it then gets stuck at
+   that skill level (or at least moves/game).
+1. WIP: PlanningPlayer has access to the score delta for each move, which is
+   a very strong signal to distinguish moves. This can be inferred from the
+   raw score distr, but may be a useful extra signal).
       
 
 ## Hyperparameter optimization & Learnings

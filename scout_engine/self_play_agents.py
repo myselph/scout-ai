@@ -26,7 +26,7 @@ class Agent(ABC):
     # - Variable length: a [B, L, C] long tensor (B moves, L padded sequence length,
     #   C channels) and a [B, L] boolean padding mask, returns [B] logits.
     #   The C channels are: 0=token ID, 1=within-span card position (1-indexed, 0=none),
-    #   2=segment (0=none, 1=table, 2=hand).
+    #   2=segment (0=none, 1=table, 2=hand), 3=card ordinal value (1-10, 0=non-card).
     policy: nn.Module
     # value_fn has the same interface as policy, but returns [B] value predictions.
     value_fn: nn.Module
@@ -346,6 +346,7 @@ dict_tokens = [
     "False",
     "<too_small>",
     "<too_large>",
+    "<score>"
 ]
 
 transformer_dict = {token: i for i, token in enumerate(dict_tokens)}
@@ -369,7 +370,7 @@ def map_int_to_tf_dict(i: int) -> int:
         return transformer_dict['<too_large>']
     else:
         return transformer_dict[f"int_{i}"]
-
+    
 SEGMENT_INDICES = {
     'PADDING': 0,
     'CLS' : 1,
@@ -403,9 +404,11 @@ class TransformerPolicyNet(nn.Module):
             self,
             post_move_states: torch.Tensor,  # [B, L, C]
             padding_mask: torch.Tensor) -> torch.Tensor:
+        ordinal = post_move_states[:, :, 3].float() / 10.0  # [B, L]
         embedded = (self.token_embedding(post_move_states[:, :, 0])
                   + self.card_pos_embedding(post_move_states[:, :, 1])
-                  + self.segment_embedding(post_move_states[:, :, 2]))  # [B, L, E]
+                  + self.segment_embedding(post_move_states[:, :, 2])
+                  + ordinal.unsqueeze(-1))  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -425,9 +428,11 @@ class TransformerValueNet(nn.Module):
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         # states: [B, L, C]
+        ordinal = (states[:, :, 3].float() -5.0) / 5.0  # [B, L]
         embedded = (self.token_embedding(states[:, :, 0])
                   + self.card_pos_embedding(states[:, :, 1])
-                  + self.segment_embedding(states[:, :, 2]))  # [B, L, E]
+                  + self.segment_embedding(states[:, :, 2])
+                  + ordinal.unsqueeze(-1))  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -457,8 +462,9 @@ class TransformerAgent(Agent):
 
     def featurize(self, info_states: tuple[InformationState, ...]) -> tuple[torch.Tensor, ...]:
         # Returns one [L, C] long tensor per info_state, where L is the sequence
-        # length and C=3 channels are: token ID, within-span card position
-        # (1-indexed, 0 for non-card tokens), segment (0=none, 1=table, 2=hand).
+        # length and C=4 channels are: token ID, within-span card position
+        # (1-indexed, 0 for non-card tokens), segment (0=none, 1=table, 2=hand),
+        # card ordinal value (1-10, 0 for non-card tokens).
         # Not yet added: history, or some subset of it such as discarded cards
         # and known card -> opponent assignments.
         results: list[torch.Tensor] = []
@@ -475,19 +481,25 @@ class TransformerAgent(Agent):
             tokens:   list[int] = []
             card_pos: list[int] = []
             segments: list[int] = []
+            ordinals: list[int] = []
 
-            def append_token(tok: int, pos: int = PADDING_IDX, seg: int = PADDING_IDX) -> None:
+            def append_token(tok: int, pos: int = PADDING_IDX, seg: int = PADDING_IDX, ordinal: int = 0) -> None:
                 tokens.append(tok)
                 card_pos.append(pos)
                 segments.append(seg)
+                ordinals.append(ordinal)
 
             append_token(TD["<CLS>"], 0, SEGMENT_INDICES['CLS'])
             for pos, c in enumerate(info_state.hand):
-                append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['HAND'])
+                append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['HAND'], c[0])
             for pos, c in enumerate(info_state.table):
-                append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['TABLE'])
-            #for pos, score in enumerate(scores_rot):
-            #    append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['SCORES'])
+                append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['TABLE'], c[0])
+            for pos, score in enumerate(scores_rot):
+                # Reuse the card ordinal channel. A bit of a hack, a separate channel would be cleaner.
+                # But more wiring, memory. So knowing the card normalization -
+                # -5, / 5 - and the distribution difference - I pre-normalize
+                # here so we still end up with roughly [-1 ; 1] features.
+                append_token(TD["<score>"], pos + 1, SEGMENT_INDICES['SCORES'], int((score + 10)/2))
             #for pos, csas in enumerate(can_scout_and_show_rot):
             #    append_token(TD["True"] if csas else TD["False"], pos + 1, SEGMENT_INDICES['CAN_SCOUT_AND_SHOW'])
             #for pos, nc in enumerate(num_cards_rot):
@@ -495,7 +507,7 @@ class TransformerAgent(Agent):
             #append_token(map_int_to_tf_dict(info_state.num_players), 0, SEGMENT_INDICES['NUM_PLAYERS'])
 
             result = torch.tensor(
-                list(zip(tokens, card_pos, segments)), dtype=torch.long, device=self.device)
+                list(zip(tokens, card_pos, segments, ordinals)), dtype=torch.long, device=self.device)
             results.append(result)
 
         return tuple(results)
