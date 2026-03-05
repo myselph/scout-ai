@@ -439,7 +439,7 @@ def train(
     # Number of agents we train in an iteration.
     num_agents_train = num_players
     # We keep copies of the best ones.
-    num_best_agents = int(0.2 * num_agents_train)
+    # num_best_agents = int(0.2 * num_agents_train)
     num_best_agents = 0
     if resume_dir is not None:
         all_pth = sorted(glob_module.glob(os.path.join(resume_dir, '*.pth')))
@@ -469,7 +469,7 @@ def train(
         num_players=num_players,
         dealer=dealer)
 
-    for iteration in range(num_iterations):
+    for iteration in range(1, num_iterations+1):
         t_start = time.time()
         # 1. Self-play
         trajectories = collect_episodes(
@@ -495,7 +495,7 @@ def train(
             data,
             minibatch_size,
             epochs,
-            microbatch_size=64
+            microbatch_size=32
         )
         del data
         if torch.cuda.is_available():
@@ -504,7 +504,7 @@ def train(
         print(f"PPO update took {t_ppo_update - t_collect_episodes:.2f} seconds.")
 
         # 4. Evaluation & shuffling.
-        if iteration % 5 == 0 and iteration > 0:
+        if iteration % 5 == 0:
             agents_list = agents + list(best_agents.values())
             order, skills = rank_against_planning_player(
                 [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=500)

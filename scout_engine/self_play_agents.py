@@ -497,7 +497,7 @@ class TransformerAgent(Agent):
             for pos, score in enumerate(scores_rot):
                 # Reuse the card ordinal channel. A bit of a hack, a separate channel would be cleaner.
                 # But more wiring, memory. So knowing the card normalization -
-                # -5, / 5 - and the distribution difference - I pre-normalize
+                # -5, / 5 - and the score distribution (-10 .. 10) - I pre-normalize
                 # here so we still end up with roughly [-1 ; 1] features.
                 append_token(TD["<score>"], pos + 1, SEGMENT_INDICES['SCORES'], int((score + 10)/2))
             #for pos, csas in enumerate(can_scout_and_show_rot):
