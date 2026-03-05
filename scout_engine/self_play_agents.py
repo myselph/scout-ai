@@ -396,7 +396,7 @@ class TransformerPolicyNet(nn.Module):
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
+                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=False), num_layers)
         self.output_layer = nn.Linear(embed_dim, 1)
 
     def forward(
@@ -420,7 +420,7 @@ class TransformerValueNet(nn.Module):
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
+                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=False), num_layers)
         self.output_layer = nn.Linear(embed_dim, 1)
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
@@ -486,13 +486,13 @@ class TransformerAgent(Agent):
                 append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['HAND'])
             for pos, c in enumerate(info_state.table):
                 append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['TABLE'])
-            for pos, score in enumerate(scores_rot):
-                append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['SCORES'])
-            for pos, csas in enumerate(can_scout_and_show_rot):
-                append_token(TD["True"] if csas else TD["False"], pos + 1, SEGMENT_INDICES['CAN_SCOUT_AND_SHOW'])
-            for pos, nc in enumerate(num_cards_rot):
-                append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['NUM_CARDS'])
-            append_token(map_int_to_tf_dict(info_state.num_players), 0, SEGMENT_INDICES['NUM_PLAYERS'])
+            #for pos, score in enumerate(scores_rot):
+            #    append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['SCORES'])
+            #for pos, csas in enumerate(can_scout_and_show_rot):
+            #    append_token(TD["True"] if csas else TD["False"], pos + 1, SEGMENT_INDICES['CAN_SCOUT_AND_SHOW'])
+            #for pos, nc in enumerate(num_cards_rot):
+            #    append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['NUM_CARDS'])
+            #append_token(map_int_to_tf_dict(info_state.num_players), 0, SEGMENT_INDICES['NUM_PLAYERS'])
 
             result = torch.tensor(
                 list(zip(tokens, card_pos, segments)), dtype=torch.long, device=self.device)
