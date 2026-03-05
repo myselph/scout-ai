@@ -63,6 +63,13 @@ parser.add_argument(
          'derives number of agents from policy files found there',
     default=None
 )
+parser.add_argument(
+    '--num_planning_players',
+    type=int,
+    help='Number of non-trainable PlanningPlayer opponents to include per game '
+         'episode during training (must be less than num_players)',
+    default=0
+)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -191,7 +198,8 @@ def collect_episodes(
     env_constructor: Callable[[int], GameState],
     min_episodes: int,
     num_players: int,
-    min_examples_per_player: int
+    min_examples_per_player: int,
+    num_static_per_game: int = 0,
 ) -> Dict[int, List[Trajectory]]:
     """
     All agents play together in a multi-player environment.
@@ -199,57 +207,84 @@ def collect_episodes(
     played in).
     We play at least num_episodes, but possibly more to ensure we collect at
     least min_examples_per_player for each agent.
+
+    If num_static_per_game > 0, that many non-trainable PlanningPlayer opponents
+    are randomly mixed into each episode. Their moves are executed but no
+    transitions are recorded for them.
     """
     data: Dict[int, List[Trajectory]] = {i: [] for i in range(len(agents))}
+    num_trainable_per_game = num_players - num_static_per_game
 
     episode = 0
     while episode < min_episodes or any(not traj for traj in data.values()) or any(sum(
             len(traj.transitions) for traj in data[i]) < min_examples_per_player for i in data):
         episode += 1
-        episode_agent_indices = random.sample(range(len(agents)), num_players)
-        episode_agents = [agents[i] for i in episode_agent_indices]
+
+        # Sample trainable agents and (optionally) static players for this episode.
+        sampled_agent_ids = random.sample(range(len(agents)), num_trainable_per_game)
+        sampled_statics = [PlanningPlayer() for _ in range(num_static_per_game)]
+
+        # Randomly assign participants to the num_players positions.
+        combined_ids = sampled_agent_ids + [None] * num_static_per_game
+        combined_participants = [agents[i] for i in sampled_agent_ids] + sampled_statics
+        perm = list(range(num_players))
+        random.shuffle(perm)
+        episode_agent_ids = [None] * num_players      # agent_id or None per position
+        episode_participants = [None] * num_players   # Agent or static Player per position
+        for slot, pos in enumerate(perm):
+            episode_agent_ids[pos] = combined_ids[slot]
+            episode_participants[pos] = combined_participants[slot]
+
         env = env_constructor(0)
         # For now, we just flip like PlanningPlayer would.
         # Eventually, we should learn a policy for that, but it complicates
         # training a bit because the flip decision requires another network.
         pp = PlanningPlayer()
-        env.maybe_flip_hand([lambda h: pp.flip_hand(h)
-                            for _ in episode_agents])
-        traj = {i: [] for i in episode_agent_indices}
+        env.maybe_flip_hand([lambda h: pp.flip_hand(h) for _ in range(num_players)])
+        traj = {agent_id: [] for agent_id in episode_agent_ids if agent_id is not None}
 
         done = False
         while not done:
             player = env.current_player
-            agent = episode_agents[player]
+            agent_id = episode_agent_ids[player]
+            participant = episode_participants[player]
 
-            raw_pre_move_state = env.info_state()
-            moves, raw_post_move_states = raw_pre_move_state.post_move_states()
-            pre_move_state = agent.featurize((raw_pre_move_state,))[0]
-            post_move_states = agent.featurize(raw_post_move_states)
-            action_idx, logp = agent.select_action(post_move_states)
-            value = agent.value(pre_move_state)
-            env.move(moves[action_idx])
-            reward = 0
-            done = env.is_finished()
+            if agent_id is None:
+                # Static (non-trainable) player: pick a move but don't record a transition.
+                move = participant.select_move(env.info_state())
+                env.move(move)
+                done = env.is_finished()
+            else:
+                raw_pre_move_state = env.info_state()
+                moves, raw_post_move_states = raw_pre_move_state.post_move_states()
+                pre_move_state = participant.featurize((raw_pre_move_state,))[0]
+                post_move_states = participant.featurize(raw_post_move_states)
+                action_idx, logp = participant.select_action(post_move_states)
+                value = participant.value(pre_move_state)
+                env.move(moves[action_idx])
+                reward = 0
+                done = env.is_finished()
 
-            traj[episode_agent_indices[player]].append(Transition(
-                pre_move_state=pre_move_state,
-                action_idx=action_idx,
-                logprob=logp,
-                reward=reward,
-                value=value,
-                done=done,
-                post_move_states=post_move_states,
-            ))
+                traj[agent_id].append(Transition(
+                    pre_move_state=pre_move_state,
+                    action_idx=action_idx,
+                    logprob=logp,
+                    reward=reward,
+                    value=value,
+                    done=done,
+                    post_move_states=post_move_states,
+                ))
+
         # Game over - assign final rewards: the difference to the average opponent
         # score. This strikes a balance between using raw scores (not indicative
         # if we won or lost) and just win/loss (too sparse).
         sum_scores = sum(env.scores)
-        for i, j in enumerate(episode_agent_indices):
-            avg_opp_score = (sum_scores - env.scores[i]) / (num_players - 1)
-            traj[j][-1].reward = env.scores[i] - avg_opp_score
-        for i in traj:
-            data[i].append(Trajectory(traj[i]))
+        for pos, agent_id in enumerate(episode_agent_ids):
+            if agent_id is not None:
+                avg_opp_score = (sum_scores - env.scores[pos]) / (num_players - 1)
+                traj[agent_id][-1].reward = env.scores[pos] - avg_opp_score
+        for agent_id in traj:
+            data[agent_id].append(Trajectory(traj[agent_id]))
 
     return data
 
@@ -398,6 +433,7 @@ def train(
     policy_lr: float | None = None,
     value_lr: float | None = None,
     resume_dir: str | None = None,
+    num_planning_players: int = 0,
 ):
     agents = []
     # Number of agents we train in an iteration.
@@ -441,7 +477,8 @@ def train(
             env_constructor,
             episodes_per_iter,
             num_players,
-            min_examples_per_player=minibatch_size
+            min_examples_per_player=minibatch_size,
+            num_static_per_game=num_planning_players,
         )
         t_collect_episodes = time.time()
         print(f"Episode collection took {t_collect_episodes - t_start:.2f} seconds.")
@@ -509,6 +546,7 @@ def main():
         policy_lr=args.policy_lr,
         value_lr=args.value_lr,
         resume_dir=args.resume_dir,
+        num_planning_players=args.num_planning_players,
     )
 
     # Find the best agent.
