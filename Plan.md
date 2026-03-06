@@ -83,11 +83,11 @@ into account.
    ordinal values (just adding c*ones*card_value or *score_value to the
    embedding); this may have helped with convergence but the ultimate skill is
    the same at 0.25.
-1. Gemini suggests to either expand the ordinal value to E via a linear
-   projection, or using sinusoids instead (because there is something about
-   shifting - there exists a linear projection to map sin(v) to sin(v+k)
-   independent of v, so relative relationships (eg that 2-3 and 7-8 are similar)
-   can be learnt. Didn't really get that but maybe worth a try)
+1. Next I tried instead projecting the ordinal value to E via a linear layer.
+   NB this still applies to the scores as well, I should use a different
+   channel and projection for that.
+1. Gemini suggests to use sinuses of different frequencies instead of linear
+   layers; there's something about "linear shift" there.
 1. I suspect, but that's a pure guess, that the Transformer does not yet learn
    the relevance of, or concept of groups and runs. Maybe that requires a larger
    network, maybe pre-training. I don't want to give up yet and will spend a bit

@@ -395,6 +395,7 @@ class TransformerPolicyNet(nn.Module):
         # excludes them from gradient updates.
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
+        self.ordinal_proj = nn.Linear(1, embed_dim)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -404,11 +405,11 @@ class TransformerPolicyNet(nn.Module):
             self,
             post_move_states: torch.Tensor,  # [B, L, C]
             padding_mask: torch.Tensor) -> torch.Tensor:
-        ordinal = post_move_states[:, :, 3].float() / 10.0  # [B, L]
+        ordinal = post_move_states[:, :, 3].float().unsqueeze(-1) / 10.0  # [B, L, 1]
         embedded = (self.token_embedding(post_move_states[:, :, 0])
                   + self.card_pos_embedding(post_move_states[:, :, 1])
                   + self.segment_embedding(post_move_states[:, :, 2])
-                  + ordinal.unsqueeze(-1))  # [B, L, E]
+                  + self.ordinal_proj(ordinal))  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -421,6 +422,7 @@ class TransformerValueNet(nn.Module):
         self.token_embedding = nn.Embedding(len(transformer_dict), embed_dim)
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
+        self.ordinal_proj = nn.Linear(1, embed_dim)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -428,11 +430,11 @@ class TransformerValueNet(nn.Module):
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         # states: [B, L, C]
-        ordinal = (states[:, :, 3].float() -5.0) / 5.0  # [B, L]
+        ordinal = (states[:, :, 3].float().unsqueeze(-1) - 5.0) / 5.0  # [B, L, 1]
         embedded = (self.token_embedding(states[:, :, 0])
                   + self.card_pos_embedding(states[:, :, 1])
                   + self.segment_embedding(states[:, :, 2])
-                  + ordinal.unsqueeze(-1))  # [B, L, E]
+                  + self.ordinal_proj(ordinal))  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -520,7 +522,7 @@ class TransformerAgentCollection(AgentCollection):
         embed_dim = 64
         num_heads = 4
         num_layers = 4
-        dim_ffd = 32
+        dim_ffd = 64
         max_card_pos = 45
         if policy_lr is None:
             policy_lr = 1e-4
