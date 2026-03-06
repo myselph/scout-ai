@@ -85,18 +85,20 @@ into account.
    the same at 0.25.
 1. Next I tried instead projecting the ordinal value to E via a linear layer.
    NB this still applies to the scores as well, I should use a different
-   channel and projection for that.
+   channel and projection for that. I also increased the ffd dimension from
+   32 to 64. Those changes did not help either.
 1. Gemini suggests to use sinuses of different frequencies instead of linear
    layers; there's something about "linear shift" there.
-1. I suspect, but that's a pure guess, that the Transformer does not yet learn
-   the relevance of, or concept of groups and runs. Maybe that requires a larger
+1. I suspect I've hit a ceiling. It's a pure guess, that the Transformer may
+   not yet learn the relevance of, or concept of groups and runs. Maybe that requires a larger
    network, maybe pre-training. I don't want to give up yet and will spend a bit
-   more time on feature engineering, and paid for GPU time. But it seems to be
-   pretty challenging to replicate the simple logic of group and run detection.
-   I could hand in these features to a Transformer, or do more advanced feature
-   engineering (eg hand strength if parts of the hand are played), but that 
-   goes against the very reason why I use Transformers in the first place - to
-   get to some magic "hand evaluator" that just works.
+   more time on feature engineering, and I paid for GPU time. But it seems to be
+   pretty challenging to get even close to PlanningPlayer, which was trivial with
+   the feedforward net. I could hand in groups/runs features to a Transformer,
+   or do more advanced feature engineering (eg hand strength if parts of the
+   hand are played), but that goes against the very reason why I use
+   Transformers in the first place - to get to some magic "hand evaluator" that
+   just works.
       
 
 ## Hyperparameter optimization & Learnings

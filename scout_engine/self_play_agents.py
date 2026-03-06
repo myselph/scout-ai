@@ -509,7 +509,7 @@ class TransformerAgent(Agent):
             #append_token(map_int_to_tf_dict(info_state.num_players), 0, SEGMENT_INDICES['NUM_PLAYERS'])
 
             result = torch.tensor(
-                list(zip(tokens, card_pos, segments, ordinals)), dtype=torch.long)
+                list(zip(tokens, card_pos, segments, ordinals)), dtype=torch.int32)
             results.append(result)
 
         return tuple(results)

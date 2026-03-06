@@ -410,10 +410,14 @@ def ppo_update(
                         minibatch_size=minibatch_len  # Normalize by full minibatch size
                     )
                     loss.backward()
+                    del loss, metrics, prms, psms
 
                 # Step optimizer after full minibatch
                 agents[agent_id].policy_optim.step()
                 agents[agent_id].value_optim.step()
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         del pre_move_states, post_move_states_list, data
         if torch.cuda.is_available():
