@@ -375,4 +375,46 @@ self play.
         1. Basic self-play; small neural net helpful to find right hyperparams
         1. Strategy specific to number of players; may be best to train N networks instead of one.
         1. Transformers very slow, big, costly to train and thus hard to experiment with.
+    1. Why Transformers? So original idea was simply, throw everything at a net,
+    let it figure stuff out - less work, but more importantly less inductive bias.
+    Specifically, I was hoping it would not only learn the card patterns that are
+    otherwise engineered (runs, groups), but also that it would be a more or less
+    straightforward extension to include history. Sort of like with LLMs - you
+    throw a ton of stuff at it and somehow AI emerges. But also because working
+    with sequences either requires LSTMs which I don't love, or feature engineering
+    where information is lost.
+    I feel that didn't happen here, and getting anywhere with Transformers required a lot of manual work -
+    feature engineering (position, segment embeddings, how to represent cards,
+    scores). Iterating with them was harder due to the high computational demands.
+    Not done yet, but I feel the amount of work that is now going into feature
+    engineering, such as using sinusoidal embeddings that allow the thing to
+    detect runs, groups, may be better spent at using a classic FFN. Put simply,
+    if I have to put a lot of effort into feature engineering, what's the point
+    of using Transformers? I have thought about other features I could include or
+    change in the classic MLP:
+      * skip runs, groups that are implied (eg runs of 3s always mean there are
+      2 runs of 2 in there)
+      * more expensive to compute, but may be very helpful: potential runs and
+      groups after a move (something like a look-ahead). I.e. if I have 1,3,3,1,
+      I get a 1,1 after playing the 3,3; but I don't have that with 1,3,5,1. A
+      bit tricky to learn because scouts, and s&s moves, would change the
+      picture (eg if I get to scout a 4 above).
+      * Somehow move from a histogram over runs and groups to include ordinal
+      values. Maybe even have a separate encoder network for
+        a. runs: length, max_val
+        b. groups: length, val
+      which projects this into an embedding. But then I have variable length
+      sequences again, at which point I wonder whether I should just use RNNs or
+      Transformers, or loose information by adding up vectors. Gah.
+      * convnets with variable sized filters may be able to capture runs and
+      groups, and almost-runs-or-groups; and maybe lead to a fixed length
+      embedding. Ie convolute with various size 2-7 filters (any run/group longer than
+      7 is exceedingly uncommon), pad input to produce fixed length output,
+      project it all onto an embedding, combine that with the other features.
+   * Or just call it a day of the sinusoidal embeddings don't work. Or do the
+   LSTM, and convnet approaches as well. Maybe they work, and with Claude code
+   and git branches this stuff should be easier to explore than in the past.
+   Embrace the breadth. Also give it the problem and ask it to design better
+   features.
+
         

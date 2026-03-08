@@ -3,6 +3,7 @@
 # network. We train the networks inside; at inference time, the agent is wrapped
 # in a Player and used in tournaments.
 
+import logging
 import os
 from collections.abc import Callable, Sequence
 from math import inf
@@ -11,6 +12,8 @@ from torch import nn
 from abc import ABC, abstractmethod
 
 from .common import InformationState, Move, StateAndScoreRecord
+
+logger = logging.getLogger(__name__)
 from . import neural_value_function
 from .players import PlanningPlayer
 
@@ -106,10 +109,35 @@ class Agent(ABC):
             batch = torch.stack(all_states).to(self.device)  # [sum(B_i), D]
             logits = self.policy(batch)                       # [sum(B_i)]
         else:
+            seq_lens = [s.shape[0] for s in all_states]
+            total_seqs = len(all_states)
+            max_seq_len = max(seq_lens)
+            min_seq_len = min(seq_lens)
+            mean_seq_len = sum(seq_lens) / total_seqs
+            action_counts = B_i_list
+            mem_before = torch.cuda.memory_allocated() / 1e6 if torch.cuda.is_available() else 0
+            logger.info(
+                f"[policy_fwd] total_seqs={total_seqs} "
+                f"(microbatch={len(B_i_list)}, actions: min={min(action_counts)} max={max(action_counts)} mean={sum(action_counts)/len(action_counts):.1f}) | "
+                f"seq_len: min={min_seq_len} max={max_seq_len} mean={mean_seq_len:.1f} | "
+                f"effective_tokens={total_seqs * max_seq_len} | "
+                f"gpu_alloc_before={mem_before:.0f}MB"
+            )
+            # Everything above to the "else: is just for logging and can be removed.
             batch = torch.nn.utils.rnn.pad_sequence(
                 all_states, batch_first=True, padding_value=PADDING_IDX).to(self.device)
             padding_mask = batch[:, :, 0] == PADDING_IDX       # [sum(B_i), L_max]
+            logger.info(
+                f"[policy_fwd] batch_shape={list(batch.shape)} "
+                f"padding_fraction={padding_mask.float().mean():.2%} "
+                f"batch_bytes={batch.numel() * batch.element_size() / 1e6:.1f}MB"
+            )
             logits = self.policy(batch, padding_mask)           # [sum(B_i)]
+            mem_after = torch.cuda.memory_allocated() / 1e6 if torch.cuda.is_available() else 0
+            mem_peak = torch.cuda.max_memory_allocated() / 1e6 if torch.cuda.is_available() else 0
+            logger.info(
+                f"[policy_fwd] done | gpu_alloc_after={mem_after:.0f}MB gpu_peak={mem_peak:.0f}MB"
+            )
 
         per_sample_logits = torch.split(logits, B_i_list)
 
@@ -127,6 +155,11 @@ class Agent(ABC):
             pre_move_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         # Takes a B-tuple of [D] tensors (fixed length) or [L, C] tensors
         # (variable length), and returns values of shape [B].
+        if not self.is_fixed_length:
+            seq_lens = [s.shape[0] for s in pre_move_states]
+            logger.info(
+                f"[value_fwd] n={len(pre_move_states)} seq_len: min={min(seq_lens)} max={max(seq_lens)} mean={sum(seq_lens)/len(seq_lens):.1f}"
+            )
         return self.invoke_net(
             self.value_fn,
             pre_move_states)
@@ -383,6 +416,21 @@ SEGMENT_INDICES = {
 }
 
 
+def make_sinusoidal_card_embedding(embed_dim: int, max_val: int = 10, base: float = 10.0) -> torch.Tensor:
+    """Sinusoidal embedding table for card ordinal values 0..max_val.
+    Index 0 is the zero vector (non-card tokens). Indices 1..max_val get
+    sinusoidal encodings using the given base (analogous to the original
+    Transformer's base=10000, but tuned for the small range of card values).
+    """
+    table = torch.zeros(max_val + 1, embed_dim)
+    pos = torch.arange(1, max_val + 1, dtype=torch.float).unsqueeze(1)  # [max_val, 1]
+    dim_i = torch.arange(0, embed_dim // 2, dtype=torch.float)           # [embed_dim//2]
+    angles = pos / base ** (2 * dim_i / embed_dim)                       # [max_val, embed_dim//2]
+    table[1:, 0::2] = torch.sin(angles)
+    table[1:, 1::2] = torch.cos(angles[:, :embed_dim - embed_dim // 2])
+    return table
+
+
 # TODO: I have some dimenion related bug in there. I found that when I call
 # forward below with a 1xN pre_move_stat and a 2xM post_move_state where both
 # rows of the post_move_state are identical, I get different logits.
@@ -395,7 +443,7 @@ class TransformerPolicyNet(nn.Module):
         # excludes them from gradient updates.
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
-        self.ordinal_proj = nn.Linear(1, embed_dim)
+        self.register_buffer('ordinal_emb', make_sinusoidal_card_embedding(embed_dim))
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -405,11 +453,10 @@ class TransformerPolicyNet(nn.Module):
             self,
             post_move_states: torch.Tensor,  # [B, L, C]
             padding_mask: torch.Tensor) -> torch.Tensor:
-        ordinal = post_move_states[:, :, 3].float().unsqueeze(-1) / 10.0  # [B, L, 1]
         embedded = (self.token_embedding(post_move_states[:, :, 0])
                   + self.card_pos_embedding(post_move_states[:, :, 1])
                   + self.segment_embedding(post_move_states[:, :, 2])
-                  + self.ordinal_proj(ordinal))  # [B, L, E]
+                  + self.ordinal_emb[post_move_states[:, :, 3]])  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -422,7 +469,7 @@ class TransformerValueNet(nn.Module):
         self.token_embedding = nn.Embedding(len(transformer_dict), embed_dim)
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
-        self.ordinal_proj = nn.Linear(1, embed_dim)
+        self.register_buffer('ordinal_emb', make_sinusoidal_card_embedding(embed_dim))
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -430,11 +477,10 @@ class TransformerValueNet(nn.Module):
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         # states: [B, L, C]
-        ordinal = (states[:, :, 3].float().unsqueeze(-1) - 5.0) / 5.0  # [B, L, 1]
         embedded = (self.token_embedding(states[:, :, 0])
                   + self.card_pos_embedding(states[:, :, 1])
                   + self.segment_embedding(states[:, :, 2])
-                  + self.ordinal_proj(ordinal))  # [B, L, E]
+                  + self.ordinal_emb[states[:, :, 3]])  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
