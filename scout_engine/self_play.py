@@ -1,16 +1,12 @@
 from __future__ import annotations
 import copy
 import glob as glob_module
-import logging
 import os
 import random
 import torch
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Sequence, Tuple, Dict, Any
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 from .evaluation import play_game, rank_against_planning_player
 from .game_state import GameState
 from .main import play_tournament
@@ -226,12 +222,6 @@ def collect_episodes(
     data: Dict[int, List[Trajectory]] = {i: [] for i in range(len(agents))}
     num_trainable_per_game = num_players - num_static_per_game
 
-    # Aggregate stats across all steps for a summary log at the end.
-    stats_hand_sizes: list[int] = []
-    stats_table_sizes: list[int] = []
-    stats_num_moves: list[int] = []
-    stats_seq_lens: list[int] = []
-
     episode = 0
     while episode < min_episodes or any(not traj for traj in data.values()) or any(sum(
             len(traj.transitions) for traj in data[i]) < min_examples_per_player for i in data):
@@ -286,11 +276,6 @@ def collect_episodes(
                 reward = 0
                 done = env.is_finished()
 
-                stats_hand_sizes.append(len(raw_pre_move_state.hand))
-                stats_table_sizes.append(len(raw_pre_move_state.table))
-                stats_num_moves.append(len(moves))
-                stats_seq_lens.append(pre_move_state.shape[0])
-
                 traj[agent_id].append(Transition(
                     pre_move_state=pre_move_state,
                     action_idx=action_idx,
@@ -311,18 +296,6 @@ def collect_episodes(
                 traj[agent_id][-1].reward = env.scores[pos] - avg_opp_score
         for agent_id in traj:
             data[agent_id].append(Trajectory(traj[agent_id]))
-
-    def pct(lst, p): return sorted(lst)[int(len(lst) * p / 100)]
-    outlier_moves = sum(1 for x in stats_num_moves if x > 80)
-    outlier_seqs  = sum(1 for x in stats_seq_lens if x > 30)
-    total_steps = len(stats_seq_lens)
-    logger.info(
-        f"[collect_episodes summary] {episode} episodes, {total_steps} steps | "
-        f"hand: mean={sum(stats_hand_sizes)/total_steps:.1f} p90={pct(stats_hand_sizes,90)} max={max(stats_hand_sizes)} | "
-        f"table: mean={sum(stats_table_sizes)/total_steps:.1f} p90={pct(stats_table_sizes,90)} max={max(stats_table_sizes)} | "
-        f"num_moves: mean={sum(stats_num_moves)/total_steps:.1f} p90={pct(stats_num_moves,90)} max={max(stats_num_moves)} outliers(>80)={outlier_moves} | "
-        f"seq_len: mean={sum(stats_seq_lens)/total_steps:.1f} p90={pct(stats_seq_lens,90)} max={max(stats_seq_lens)} outliers(>30)={outlier_seqs}"
-    )
 
     return data
 
@@ -428,7 +401,7 @@ def ppo_update(
                 agents[agent_id].policy_optim.zero_grad()
                 agents[agent_id].value_optim.zero_grad()
 
-                # Process minibatch in microbatches to save memory.post_move_states
+                # Process minibatch in microbatches to save memory.
                 # Accumulate transitions until we exceed microbatch_action_budget
                 # total actions, so that the effective Transformer batch size
                 # (transitions * actions_per_transition) stays bounded.
@@ -438,18 +411,6 @@ def ppo_update(
                     mb_idx_t = torch.tensor(mb_idx_list)
                     prms = [pre_move_states[i] for i in mb_idx_list]
                     psms = [post_move_states_list[i] for i in mb_idx_list]
-
-                    gpu_mem_str = "n/a"
-                    if torch.cuda.is_available():
-                        torch.cuda.reset_peak_memory_stats()
-                        gpu_mem_str = f"{torch.cuda.memory_allocated() / 1e6:.0f}MB"
-                    action_counts = [len(s) for s in psms]
-                    logger.info(
-                        f"[microbatch agent={agent_id}] n={len(mb_idx_list)} "
-                        f"actions: min={min(action_counts)} max={max(action_counts)} mean={sum(action_counts)/len(action_counts):.1f} total={sum(action_counts)} | "
-                        f"gpu_alloc={gpu_mem_str}"
-                    )
-
                     loss, metrics = ppo_loss(
                         agents[agent_id],
                         pre_move_states=prms,
@@ -461,13 +422,6 @@ def ppo_update(
                         minibatch_size=minibatch_len,
                     )
                     loss.backward()
-                    if torch.cuda.is_available():
-                        mem_peak = torch.cuda.max_memory_allocated() / 1e6
-                        mem_after = torch.cuda.memory_allocated() / 1e6
-                        logger.info(
-                            f"[microbatch agent={agent_id}] after backward: "
-                            f"peak={mem_peak:.0f}MB current={mem_after:.0f}MB"
-                        )
                     del loss, metrics, prms, psms
 
                 mb_indices = []

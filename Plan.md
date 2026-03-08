@@ -99,6 +99,9 @@ into account.
    hand are played), but that goes against the very reason why I use
    Transformers in the first place - to get to some magic "hand evaluator" that
    just works.
+1. I realized subsampling actions me allow for significant speed-ups and thus
+   experimentation. Also went to sinusoidal embeddings, and saving memory by
+   dynamically adjusting microbatch size.
       
 
 ## Hyperparameter optimization & Learnings

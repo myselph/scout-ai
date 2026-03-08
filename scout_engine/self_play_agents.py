@@ -3,7 +3,6 @@
 # network. We train the networks inside; at inference time, the agent is wrapped
 # in a Player and used in tournaments.
 
-import logging
 import os
 from collections.abc import Callable, Sequence
 from math import inf
@@ -12,8 +11,6 @@ from torch import nn
 from abc import ABC, abstractmethod
 
 from .common import InformationState, Move, StateAndScoreRecord
-
-logger = logging.getLogger(__name__)
 from . import neural_value_function
 from .players import PlanningPlayer
 
@@ -109,35 +106,10 @@ class Agent(ABC):
             batch = torch.stack(all_states).to(self.device)  # [sum(B_i), D]
             logits = self.policy(batch)                       # [sum(B_i)]
         else:
-            seq_lens = [s.shape[0] for s in all_states]
-            total_seqs = len(all_states)
-            max_seq_len = max(seq_lens)
-            min_seq_len = min(seq_lens)
-            mean_seq_len = sum(seq_lens) / total_seqs
-            action_counts = B_i_list
-            mem_before = torch.cuda.memory_allocated() / 1e6 if torch.cuda.is_available() else 0
-            logger.info(
-                f"[policy_fwd] total_seqs={total_seqs} "
-                f"(microbatch={len(B_i_list)}, actions: min={min(action_counts)} max={max(action_counts)} mean={sum(action_counts)/len(action_counts):.1f}) | "
-                f"seq_len: min={min_seq_len} max={max_seq_len} mean={mean_seq_len:.1f} | "
-                f"effective_tokens={total_seqs * max_seq_len} | "
-                f"gpu_alloc_before={mem_before:.0f}MB"
-            )
-            # Everything above to the "else: is just for logging and can be removed.
             batch = torch.nn.utils.rnn.pad_sequence(
                 all_states, batch_first=True, padding_value=PADDING_IDX).to(self.device)
             padding_mask = batch[:, :, 0] == PADDING_IDX       # [sum(B_i), L_max]
-            logger.info(
-                f"[policy_fwd] batch_shape={list(batch.shape)} "
-                f"padding_fraction={padding_mask.float().mean():.2%} "
-                f"batch_bytes={batch.numel() * batch.element_size() / 1e6:.1f}MB"
-            )
             logits = self.policy(batch, padding_mask)           # [sum(B_i)]
-            mem_after = torch.cuda.memory_allocated() / 1e6 if torch.cuda.is_available() else 0
-            mem_peak = torch.cuda.max_memory_allocated() / 1e6 if torch.cuda.is_available() else 0
-            logger.info(
-                f"[policy_fwd] done | gpu_alloc_after={mem_after:.0f}MB gpu_peak={mem_peak:.0f}MB"
-            )
 
         per_sample_logits = torch.split(logits, B_i_list)
 
@@ -155,11 +127,6 @@ class Agent(ABC):
             pre_move_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         # Takes a B-tuple of [D] tensors (fixed length) or [L, C] tensors
         # (variable length), and returns values of shape [B].
-        if not self.is_fixed_length:
-            seq_lens = [s.shape[0] for s in pre_move_states]
-            logger.info(
-                f"[value_fwd] n={len(pre_move_states)} seq_len: min={min(seq_lens)} max={max(seq_lens)} mean={sum(seq_lens)/len(seq_lens):.1f}"
-            )
         return self.invoke_net(
             self.value_fn,
             pre_move_states)
