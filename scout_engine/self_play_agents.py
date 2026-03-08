@@ -453,10 +453,11 @@ class TransformerPolicyNet(nn.Module):
             self,
             post_move_states: torch.Tensor,  # [B, L, C]
             padding_mask: torch.Tensor) -> torch.Tensor:
+        ordinal_idx = post_move_states[:, :, 3].clamp(0, self.ordinal_emb.shape[0] - 1)
         embedded = (self.token_embedding(post_move_states[:, :, 0])
                   + self.card_pos_embedding(post_move_states[:, :, 1])
                   + self.segment_embedding(post_move_states[:, :, 2])
-                  + self.ordinal_emb[post_move_states[:, :, 3]])  # [B, L, E]
+                  + self.ordinal_emb[ordinal_idx])  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -477,10 +478,11 @@ class TransformerValueNet(nn.Module):
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         # states: [B, L, C]
+        ordinal_idx = states[:, :, 3].clamp(0, self.ordinal_emb.shape[0] - 1)
         embedded = (self.token_embedding(states[:, :, 0])
                   + self.card_pos_embedding(states[:, :, 1])
                   + self.segment_embedding(states[:, :, 2])
-                  + self.ordinal_emb[states[:, :, 3]])  # [B, L, E]
+                  + self.ordinal_emb[ordinal_idx])  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
