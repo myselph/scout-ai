@@ -535,7 +535,7 @@ def train(
         if iteration % 5 == 0:
             agents_list = agents + list(best_agents.values())
             order, skills = rank_against_planning_player(
-                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=500)
+                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=100)
             agents = [agents_list[i] for i in order[:num_agents_train]]
             if args.use_transformer:
                 TransformerAgentCollection.save_agents(

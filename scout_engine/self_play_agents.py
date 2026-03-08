@@ -23,10 +23,11 @@ class Agent(ABC):
 
     # policy must have a forward() method that takes in:
     # - Fixed length: a [B, D] float tensor (B moves, D features), returns [B] logits.
-    # - Variable length: a [B, L, C] long tensor (B moves, L padded sequence length,
+    # - Variable length: a [B, L, C] float tensor (B moves, L padded sequence length,
     #   C channels) and a [B, L] boolean padding mask, returns [B] logits.
     #   The C channels are: 0=token ID, 1=within-span card position (1-indexed, 0=none),
-    #   2=segment (0=none, 1=table, 2=hand), 3=card ordinal value (1-10, 0=non-card).
+    #   2=segment (0=none, 1=table, 2=hand), 3=card ordinal value (1-10, 0=non-card),
+    #   4=normalized score value (float, 0.0 for non-score tokens).
     policy: nn.Module
     # value_fn has the same interface as policy, but returns [B] value predictions.
     value_fn: nn.Module
@@ -346,7 +347,8 @@ dict_tokens = [
     "False",
     "<too_small>",
     "<too_large>",
-    "<score>"
+    "<score>",
+    "<num_cards>",
 ]
 
 transformer_dict = {token: i for i, token in enumerate(dict_tokens)}
@@ -411,6 +413,8 @@ class TransformerPolicyNet(nn.Module):
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.register_buffer('ordinal_emb', make_sinusoidal_card_embedding(embed_dim))
+        self.score_proj = nn.Linear(1, embed_dim, bias=False)
+        self.num_cards_proj = nn.Linear(1, embed_dim, bias=False)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
@@ -418,13 +422,17 @@ class TransformerPolicyNet(nn.Module):
 
     def forward(
             self,
-            post_move_states: torch.Tensor,  # [B, L, C]
+            post_move_states: torch.Tensor,  # [B, L, C] float32
             padding_mask: torch.Tensor) -> torch.Tensor:
-        ordinal_idx = post_move_states[:, :, 3].clamp(0, self.ordinal_emb.shape[0] - 1)
-        embedded = (self.token_embedding(post_move_states[:, :, 0])
-                  + self.card_pos_embedding(post_move_states[:, :, 1])
-                  + self.segment_embedding(post_move_states[:, :, 2])
-                  + self.ordinal_emb[ordinal_idx])  # [B, L, E]
+        ordinal_idx = post_move_states[:, :, 3].long().clamp(0, self.ordinal_emb.shape[0] - 1)
+        score_vals = post_move_states[:, :, 4].unsqueeze(-1)      # [B, L, 1]
+        num_cards_vals = post_move_states[:, :, 5].unsqueeze(-1)  # [B, L, 1]
+        embedded = (self.token_embedding(post_move_states[:, :, 0].long())
+                  + self.card_pos_embedding(post_move_states[:, :, 1].long())
+                  + self.segment_embedding(post_move_states[:, :, 2].long())
+                  + self.ordinal_emb[ordinal_idx]
+                  + self.score_proj(score_vals)
+                  + self.num_cards_proj(num_cards_vals))  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -438,18 +446,24 @@ class TransformerValueNet(nn.Module):
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
         self.segment_embedding = nn.Embedding(len(SEGMENT_INDICES), embed_dim, padding_idx=PADDING_IDX)  # 0=none,1=table,2=hand
         self.register_buffer('ordinal_emb', make_sinusoidal_card_embedding(embed_dim))
+        self.score_proj = nn.Linear(1, embed_dim, bias=False)
+        self.num_cards_proj = nn.Linear(1, embed_dim, bias=False)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
         self.output_layer = nn.Linear(embed_dim, 1)
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
-        # states: [B, L, C]
-        ordinal_idx = states[:, :, 3].clamp(0, self.ordinal_emb.shape[0] - 1)
-        embedded = (self.token_embedding(states[:, :, 0])
-                  + self.card_pos_embedding(states[:, :, 1])
-                  + self.segment_embedding(states[:, :, 2])
-                  + self.ordinal_emb[ordinal_idx])  # [B, L, E]
+        # states: [B, L, C] float32
+        ordinal_idx = states[:, :, 3].long().clamp(0, self.ordinal_emb.shape[0] - 1)
+        score_vals = states[:, :, 4].unsqueeze(-1)      # [B, L, 1]
+        num_cards_vals = states[:, :, 5].unsqueeze(-1)  # [B, L, 1]
+        embedded = (self.token_embedding(states[:, :, 0].long())
+                  + self.card_pos_embedding(states[:, :, 1].long())
+                  + self.segment_embedding(states[:, :, 2].long())
+                  + self.ordinal_emb[ordinal_idx]
+                  + self.score_proj(score_vals)
+                  + self.num_cards_proj(num_cards_vals))  # [B, L, E]
         transformed = self.transformer(embedded, src_key_padding_mask=padding_mask)  # [B, L, E]
         cls_embeddings = transformed[:, 0, :]  # [B, E]
         return self.output_layer(cls_embeddings).squeeze(1)  # [B]
@@ -478,10 +492,12 @@ class TransformerAgent(Agent):
         )
 
     def featurize(self, info_states: tuple[InformationState, ...]) -> tuple[torch.Tensor, ...]:
-        # Returns one [L, C] long tensor per info_state, where L is the sequence
-        # length and C=4 channels are: token ID, within-span card position
-        # (1-indexed, 0 for non-card tokens), segment (0=none, 1=table, 2=hand),
-        # card ordinal value (1-10, 0 for non-card tokens).
+        # Returns one [L, C] float32 tensor per info_state, where L is the sequence
+        # length and C=6 channels are: token ID, within-span card position
+        # (1-indexed, 0 for non-card tokens), segment, card ordinal value
+        # (1-10, 0 for non-card tokens), normalized score value (float, 0.0 for
+        # non-score tokens), normalized num_cards value (float, 0.0 for
+        # non-num_cards tokens).
         # Not yet added: history, or some subset of it such as discarded cards
         # and known card -> opponent assignments.
         results: list[torch.Tensor] = []
@@ -495,36 +511,42 @@ class TransformerAgent(Agent):
             can_scout_and_show_rot = (info_state.can_scout_and_show[info_state.current_player:] +
                                       info_state.can_scout_and_show[:info_state.current_player])
 
-            tokens:   list[int] = []
-            card_pos: list[int] = []
-            segments: list[int] = []
-            ordinals: list[int] = []
+            tokens:          list[int]   = []
+            card_pos:        list[int]   = []
+            segments:        list[int]   = []
+            ordinals:        list[int]   = []
+            score_vals:      list[float] = []
+            num_cards_vals:  list[float] = []
 
-            def append_token(tok: int, pos: int = PADDING_IDX, seg: int = PADDING_IDX, ordinal: int = 0) -> None:
+            def append_token(tok: int, pos: int = PADDING_IDX, seg: int = PADDING_IDX,
+                             ordinal: int = 0, score_val: float = 0.0,
+                             num_cards_val: float = 0.0) -> None:
                 tokens.append(tok)
                 card_pos.append(pos)
                 segments.append(seg)
                 ordinals.append(ordinal)
+                score_vals.append(score_val)
+                num_cards_vals.append(num_cards_val)
 
             append_token(TD["<CLS>"], 0, SEGMENT_INDICES['CLS'])
             for pos, c in enumerate(info_state.hand):
                 append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['HAND'], c[0])
             for pos, c in enumerate(info_state.table):
                 append_token(map_card_to_tf_dict(c[0]), pos + 1, SEGMENT_INDICES['TABLE'], c[0])
+            mean_score = sum(scores_rot) / len(scores_rot)
             for pos, score in enumerate(scores_rot):
-                # Reuse the card ordinal channel. A bit of a hack, a separate channel would be cleaner.
-                # But more wiring, memory. So knowing the card normalization -
-                # -5, / 5 - and the score distribution (-10 .. 10) - I pre-normalize
-                # here so we still end up with roughly [-1 ; 1] features.
-                append_token(TD["<score>"], pos + 1, SEGMENT_INDICES['SCORES'], int((score + 10)/2))
-            #for pos, csas in enumerate(can_scout_and_show_rot):
-            #    append_token(TD["True"] if csas else TD["False"], pos + 1, SEGMENT_INDICES['CAN_SCOUT_AND_SHOW'])
-            #for pos, nc in enumerate(num_cards_rot):
-            #    append_token(map_int_to_tf_dict(i), pos + 1, SEGMENT_INDICES['NUM_CARDS'])
+                normalized = (score - mean_score) / 20.0
+                append_token(TD["<score>"], pos + 1, SEGMENT_INDICES['SCORES'], 0, normalized)
+            for pos, csas in enumerate(can_scout_and_show_rot):
+                append_token(TD["True"] if csas else TD["False"], pos + 1, SEGMENT_INDICES['CAN_SCOUT_AND_SHOW'])
+            for pos, nc in enumerate(num_cards_rot):
+                append_token(TD["<num_cards>"], pos + 1, SEGMENT_INDICES['NUM_CARDS'],
+                             num_cards_val=(nc - 5) / 5.0)
             #append_token(map_int_to_tf_dict(info_state.num_players), 0, SEGMENT_INDICES['NUM_PLAYERS'])
 
             result = torch.tensor(
-                list(zip(tokens, card_pos, segments, ordinals)), dtype=torch.int32)
+                list(zip(tokens, card_pos, segments, ordinals, score_vals, num_cards_vals)),
+                dtype=torch.float32)
             results.append(result)
 
         return tuple(results)
