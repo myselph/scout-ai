@@ -78,6 +78,13 @@ parser.add_argument(
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+# cap on legal moves considered per step during rollout. This is usually in the
+# two digit range, but I've seen peaks like 711; and those caused GPU memory
+# spikes. I fixed this by dynamically adjusting the microbatch size, but it
+# still seemed like a reasonable thing to do to subsample actions during
+# roll-outs; this should hardly effect performance, and some degree of randomness
+# during training is desirable anyway.
+MAX_ACTIONS = 100  
 
 # ----------------------------------------------------------------------
 # Data structures for rollout storage
@@ -267,6 +274,10 @@ def collect_episodes(
             else:
                 raw_pre_move_state = env.info_state()
                 moves, raw_post_move_states = raw_pre_move_state.post_move_states()
+                if len(moves) > MAX_ACTIONS:
+                    indices = random.sample(range(len(moves)), MAX_ACTIONS)
+                    moves = [moves[i] for i in indices]
+                    raw_post_move_states = tuple(raw_post_move_states[i] for i in indices)
                 pre_move_state = participant.featurize((raw_pre_move_state,))[0]
                 post_move_states = participant.featurize(raw_post_move_states)
                 action_idx, logp = participant.select_action(post_move_states)
@@ -384,7 +395,8 @@ def ppo_update(
     data_by_agent: Dict[int, Dict[str, Any]],
     minibatch_size: int,
     epochs: int,
-    microbatch_size: int = 32
+    microbatch_size: int = 32,
+    microbatch_action_budget: int = 1500,
 ):
     """
     Run PPO updates for each agent separately.
@@ -416,14 +428,16 @@ def ppo_update(
                 agents[agent_id].policy_optim.zero_grad()
                 agents[agent_id].value_optim.zero_grad()
 
-                # Process minibatch in microbatches to save memory
+                # Process minibatch in microbatches to save memory.post_move_states
+                # Accumulate transitions until we exceed microbatch_action_budget
+                # total actions, so that the effective Transformer batch size
+                # (transitions * actions_per_transition) stays bounded.
                 minibatch_len = len(minibatch_indices)
-                for mb_start in range(0, minibatch_len, microbatch_size):
-                    mb_end = min(mb_start + microbatch_size, minibatch_len)
-                    mb_indices = minibatch_indices[mb_start:mb_end]
 
-                    prms = [pre_move_states[i] for i in mb_indices]
-                    psms = [post_move_states_list[i] for i in mb_indices]
+                def flush_microbatch(mb_idx_list):
+                    mb_idx_t = torch.tensor(mb_idx_list)
+                    prms = [pre_move_states[i] for i in mb_idx_list]
+                    psms = [post_move_states_list[i] for i in mb_idx_list]
 
                     gpu_mem_str = "n/a"
                     if torch.cuda.is_available():
@@ -431,21 +445,20 @@ def ppo_update(
                         gpu_mem_str = f"{torch.cuda.memory_allocated() / 1e6:.0f}MB"
                     action_counts = [len(s) for s in psms]
                     logger.info(
-                        f"[microbatch agent={agent_id}] n={len(mb_indices)} "
+                        f"[microbatch agent={agent_id}] n={len(mb_idx_list)} "
                         f"actions: min={min(action_counts)} max={max(action_counts)} mean={sum(action_counts)/len(action_counts):.1f} total={sum(action_counts)} | "
                         f"gpu_alloc={gpu_mem_str}"
                     )
 
-                    # Compute loss for microbatch
                     loss, metrics = ppo_loss(
                         agents[agent_id],
                         pre_move_states=prms,
                         post_move_states_list=psms,
-                        action_idx=actions[mb_indices],
-                        old_logprob=old_logprobs[mb_indices].to(device),
-                        returns=returns[mb_indices].to(device),
-                        advantages=advantages[mb_indices].to(device),
-                        minibatch_size=minibatch_len  # Normalize by full minibatch size
+                        action_idx=actions[mb_idx_t],
+                        old_logprob=old_logprobs[mb_idx_t].to(device),
+                        returns=returns[mb_idx_t].to(device),
+                        advantages=advantages[mb_idx_t].to(device),
+                        minibatch_size=minibatch_len,
                     )
                     loss.backward()
                     if torch.cuda.is_available():
@@ -456,6 +469,19 @@ def ppo_update(
                             f"peak={mem_peak:.0f}MB current={mem_after:.0f}MB"
                         )
                     del loss, metrics, prms, psms
+
+                mb_indices = []
+                mb_action_count = 0
+                for idx in minibatch_indices.tolist():
+                    n = len(post_move_states_list[idx])
+                    if mb_indices and mb_action_count + n > microbatch_action_budget:
+                        flush_microbatch(mb_indices)
+                        mb_indices = []
+                        mb_action_count = 0
+                    mb_indices.append(idx)
+                    mb_action_count += n
+                if mb_indices:
+                    flush_microbatch(mb_indices)
 
                 # Step optimizer after full minibatch
                 agents[agent_id].policy_optim.step()
@@ -544,7 +570,6 @@ def train(
             data,
             minibatch_size,
             epochs,
-            microbatch_size=32
         )
         del data
         if torch.cuda.is_available():
