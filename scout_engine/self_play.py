@@ -479,7 +479,7 @@ def train(
 ):
     agents = []
     # We keep copies of the best ones.
-    # num_best_agents = int(0.2 * num_trainable_players)
+    # num_best_agents = int(0.2 * num_agents_train)
     num_best_agents = 0
     if resume_dir is not None:
         all_pth = sorted(glob_module.glob(os.path.join(resume_dir, '*.pth')))
