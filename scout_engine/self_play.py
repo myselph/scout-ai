@@ -45,11 +45,6 @@ parser.add_argument(
     help='Use transformer-based agents instead of simple feedforward agents'
 )
 parser.add_argument(
-    '--transformer_norm_first',
-    action='store_true',
-    help='Use norm_first in Transformer'
-)
-parser.add_argument(
     '--policy_lr',
     type=float,
     help='Learning rate for the policy network',
@@ -62,16 +57,42 @@ parser.add_argument(
     default=None
 )
 parser.add_argument(
+    '--num_players',
+    type=int,
+    help='Number of players in a game (3-5)',
+    default=5
+)
+parser.add_argument(
+    '--num_trainable_players',
+    type=int,
+    help='Number of trainable players. Must be >= num_players+num_planning_players',
+    default=5
+)
+parser.add_argument(
     '--resume_dir',
     type=str,
     help='Directory containing .pth files to resume training from; '
          'derives number of agents from policy files found there',
     default=None
 )
+parser.add_argument(
+    '--num_planning_players',
+    type=int,
+    help='Number of non-trainable PlanningPlayer opponents to include per game '
+         'episode during training (must be less than num_players)',
+    default=0
+)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+# cap on legal moves considered per step during rollout. This is usually in the
+# two digit range, but I've seen peaks like 711; and those caused GPU memory
+# spikes. I fixed this by dynamically adjusting the microbatch size, but it
+# still seemed like a reasonable thing to do to subsample actions during
+# roll-outs; this should hardly effect performance, and some degree of randomness
+# during training is desirable anyway.
+MAX_ACTIONS = 100  
 
 # ----------------------------------------------------------------------
 # Data structures for rollout storage
@@ -196,7 +217,8 @@ def collect_episodes(
     env_constructor: Callable[[int], GameState],
     min_episodes: int,
     num_players: int,
-    min_examples_per_player: int
+    min_examples_per_player: int,
+    num_static_per_game: int = 0,
 ) -> Dict[int, List[Trajectory]]:
     """
     All agents play together in a multi-player environment.
@@ -204,57 +226,88 @@ def collect_episodes(
     played in).
     We play at least num_episodes, but possibly more to ensure we collect at
     least min_examples_per_player for each agent.
+
+    If num_static_per_game > 0, that many non-trainable PlanningPlayer opponents
+    are randomly mixed into each episode. Their moves are executed but no
+    transitions are recorded for them.
     """
     data: Dict[int, List[Trajectory]] = {i: [] for i in range(len(agents))}
+    num_trainable_per_game = num_players - num_static_per_game
 
     episode = 0
     while episode < min_episodes or any(not traj for traj in data.values()) or any(sum(
             len(traj.transitions) for traj in data[i]) < min_examples_per_player for i in data):
         episode += 1
-        episode_agent_indices = random.sample(range(len(agents)), num_players)
-        episode_agents = [agents[i] for i in episode_agent_indices]
+
+        # Sample trainable agents and (optionally) static players for this episode.
+        sampled_agent_ids = random.sample(range(len(agents)), num_trainable_per_game)
+        sampled_statics = [PlanningPlayer() for _ in range(num_static_per_game)]
+
+        # Randomly assign participants to the num_players positions.
+        combined_ids = sampled_agent_ids + [None] * num_static_per_game
+        combined_participants = [agents[i] for i in sampled_agent_ids] + sampled_statics
+        perm = list(range(num_players))
+        random.shuffle(perm)
+        episode_agent_ids = [None] * num_players      # agent_id or None per position
+        episode_participants = [None] * num_players   # Agent or static Player per position
+        for slot, pos in enumerate(perm):
+            episode_agent_ids[pos] = combined_ids[slot]
+            episode_participants[pos] = combined_participants[slot]
+
         env = env_constructor(0)
         # For now, we just flip like PlanningPlayer would.
         # Eventually, we should learn a policy for that, but it complicates
         # training a bit because the flip decision requires another network.
         pp = PlanningPlayer()
-        env.maybe_flip_hand([lambda h: pp.flip_hand(h)
-                            for _ in episode_agents])
-        traj = {i: [] for i in episode_agent_indices}
+        env.maybe_flip_hand([lambda h: pp.flip_hand(h) for _ in range(num_players)])
+        traj = {agent_id: [] for agent_id in episode_agent_ids if agent_id is not None}
 
         done = False
         while not done:
             player = env.current_player
-            agent = episode_agents[player]
+            agent_id = episode_agent_ids[player]
+            participant = episode_participants[player]
 
-            raw_pre_move_state = env.info_state()
-            moves, raw_post_move_states = raw_pre_move_state.post_move_states()
-            pre_move_state = agent.featurize((raw_pre_move_state,))[0]
-            post_move_states = agent.featurize(raw_post_move_states)
-            action_idx, logp = agent.select_action(post_move_states)
-            value = agent.value(pre_move_state)
-            env.move(moves[action_idx])
-            reward = 0
-            done = env.is_finished()
+            if agent_id is None:
+                # Static (non-trainable) player: pick a move but don't record a transition.
+                move = participant.select_move(env.info_state())
+                env.move(move)
+                done = env.is_finished()
+            else:
+                raw_pre_move_state = env.info_state()
+                moves, raw_post_move_states = raw_pre_move_state.post_move_states()
+                if len(moves) > MAX_ACTIONS:
+                    indices = random.sample(range(len(moves)), MAX_ACTIONS)
+                    moves = [moves[i] for i in indices]
+                    raw_post_move_states = tuple(raw_post_move_states[i] for i in indices)
+                pre_move_state = participant.featurize((raw_pre_move_state,))[0]
+                post_move_states = participant.featurize(raw_post_move_states)
+                action_idx, logp = participant.select_action(post_move_states)
+                value = participant.value(pre_move_state)
+                env.move(moves[action_idx])
+                reward = 0
+                done = env.is_finished()
 
-            traj[episode_agent_indices[player]].append(Transition(
-                pre_move_state=pre_move_state,
-                action_idx=action_idx,
-                logprob=logp,
-                reward=reward,
-                value=value,
-                done=done,
-                post_move_states=post_move_states,
-            ))
+                traj[agent_id].append(Transition(
+                    pre_move_state=pre_move_state,
+                    action_idx=action_idx,
+                    logprob=logp,
+                    reward=reward,
+                    value=value,
+                    done=done,
+                    post_move_states=post_move_states,
+                ))
+
         # Game over - assign final rewards: the difference to the average opponent
         # score. This strikes a balance between using raw scores (not indicative
         # if we won or lost) and just win/loss (too sparse).
         sum_scores = sum(env.scores)
-        for i, j in enumerate(episode_agent_indices):
-            avg_opp_score = (sum_scores - env.scores[i]) / (num_players - 1)
-            traj[j][-1].reward = env.scores[i] - avg_opp_score
-        for i in traj:
-            data[i].append(Trajectory(traj[i]))
+        for pos, agent_id in enumerate(episode_agent_ids):
+            if agent_id is not None:
+                avg_opp_score = (sum_scores - env.scores[pos]) / (num_players - 1)
+                traj[agent_id][-1].reward = env.scores[pos] - avg_opp_score
+        for agent_id in traj:
+            data[agent_id].append(Trajectory(traj[agent_id]))
 
     return data
 
@@ -327,15 +380,17 @@ def ppo_update(
     data_by_agent: Dict[int, Dict[str, Any]],
     minibatch_size: int,
     epochs: int,
-    microbatch_size: int = 32
+    microbatch_size: int = 32,
+    microbatch_action_budget: int = 1500,
 ):
     """
     Run PPO updates for each agent separately.
     NOTE: all agents share value_fn, so value_optimizer updates it globally.
     """
 
-    for agent_id, data in data_by_agent.items():
+    for agent_id in list(data_by_agent.keys()):
         print(f"training agent {agent_id}")
+        data = data_by_agent.pop(agent_id)
         pre_move_states = data["pre_move_states"]
         actions = data["actions"]
         post_move_states_list = data["post_move_states_list"]
@@ -358,31 +413,52 @@ def ppo_update(
                 agents[agent_id].policy_optim.zero_grad()
                 agents[agent_id].value_optim.zero_grad()
 
-                # Process minibatch in microbatches to save memory
+                # Process minibatch in microbatches to save memory.
+                # Accumulate transitions until we exceed microbatch_action_budget
+                # total actions, so that the effective Transformer batch size
+                # (transitions * actions_per_transition) stays bounded.
                 minibatch_len = len(minibatch_indices)
-                for mb_start in range(0, minibatch_len, microbatch_size):
-                    mb_end = min(mb_start + microbatch_size, minibatch_len)
-                    mb_indices = minibatch_indices[mb_start:mb_end]
 
-                    prms = [pre_move_states[i] for i in mb_indices]
-                    psms = [post_move_states_list[i] for i in mb_indices]
-
-                    # Compute loss for microbatch
+                def flush_microbatch(mb_idx_list):
+                    mb_idx_t = torch.tensor(mb_idx_list)
+                    prms = [pre_move_states[i] for i in mb_idx_list]
+                    psms = [post_move_states_list[i] for i in mb_idx_list]
                     loss, metrics = ppo_loss(
                         agents[agent_id],
                         pre_move_states=prms,
                         post_move_states_list=psms,
-                        action_idx=actions[mb_indices],
-                        old_logprob=old_logprobs[mb_indices].to(device),
-                        returns=returns[mb_indices].to(device),
-                        advantages=advantages[mb_indices].to(device),
-                        minibatch_size=minibatch_len  # Normalize by full minibatch size
+                        action_idx=actions[mb_idx_t],
+                        old_logprob=old_logprobs[mb_idx_t].to(device),
+                        returns=returns[mb_idx_t].to(device),
+                        advantages=advantages[mb_idx_t].to(device),
+                        minibatch_size=minibatch_len,
                     )
                     loss.backward()
+                    del loss, metrics, prms, psms
+
+                mb_indices = []
+                mb_action_count = 0
+                for idx in minibatch_indices.tolist():
+                    n = len(post_move_states_list[idx])
+                    if mb_indices and mb_action_count + n > microbatch_action_budget:
+                        flush_microbatch(mb_indices)
+                        mb_indices = []
+                        mb_action_count = 0
+                    mb_indices.append(idx)
+                    mb_action_count += n
+                if mb_indices:
+                    flush_microbatch(mb_indices)
 
                 # Step optimizer after full minibatch
                 agents[agent_id].policy_optim.step()
                 agents[agent_id].value_optim.step()
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        del pre_move_states, post_move_states_list, data
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 # ----------------------------------------------------------------------
@@ -393,39 +469,39 @@ def train(
     num_iterations: int,
     episodes_per_iter: int,
     num_players: int,
+    num_trainable_players: int,
     minibatch_size: int = 512,
     epochs: int = 2,
     policy_lr: float | None = None,
     value_lr: float | None = None,
     resume_dir: str | None = None,
+    num_planning_players: int = 0,
 ):
     agents = []
-    # Number of agents we train in an iteration.
-    num_agents_train = num_players
     # We keep copies of the best ones.
-    num_best_agents = int(0.2 * num_agents_train)
+    # num_best_agents = int(0.2 * num_agents_train)
     num_best_agents = 0
     if resume_dir is not None:
         all_pth = sorted(glob_module.glob(os.path.join(resume_dir, '*.pth')))
         policy_paths = [p for p in all_pth if not p.endswith('_value_fn.pth')]
         value_fn_paths = [p for p in all_pth if p.endswith('_value_fn.pth')]
         value_fn_path = value_fn_paths[-1] if value_fn_paths else None
-        num_agents_train = len(policy_paths)
-        if num_agents_train < num_players:
+        num_trainable_players = len(policy_paths)
+        if num_trainable_players + num_planning_players < num_players:
             raise ValueError(
-                f"resume_dir has {num_agents_train} policy files but num_players={num_players}; "
-                "need at least num_players agents to run self-play"
+                f"resume_dir has {num_trainable_players} policy files but num_players={num_players} "
+                "and num_planning_players={num_planning_players}"
             )
         if args.use_transformer:
             agents = TransformerAgentCollection.load_agents(policy_paths, value_fn_path, device)
         else:
             agents = SimpleAgentCollection.load_agents(policy_paths, value_fn_path, device)
-        print(f"Resumed {num_agents_train} agents from {resume_dir} "
+        print(f"Resumed {num_trainable_players} agents from {resume_dir} "
               f"(value fn: {value_fn_path})")
     elif args.use_transformer:
-        agents = TransformerAgentCollection.create_agents(num_agents_train, device, policy_lr=policy_lr, value_lr=value_lr)
+        agents = TransformerAgentCollection.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
     else:
-        agents = SimpleAgentCollection.create_agents(num_agents_train, device, policy_lr=policy_lr, value_lr=value_lr)
+        agents = SimpleAgentCollection.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
 
     best_agents: dict[float, Agent] = {}
 
@@ -433,22 +509,31 @@ def train(
         num_players=num_players,
         dealer=dealer)
 
-    for iteration in range(num_iterations):
+    for iteration in range(1, num_iterations+1):
         t_start = time.time()
-        # 1. Self-play
+        # 1. Self-play (eval mode so dropout doesn't corrupt stored logprobs)
+        for a in agents:
+            a.policy.eval()
+            a.value_fn.eval()
         trajectories = collect_episodes(
             agents,
             env_constructor,
             episodes_per_iter,
             num_players,
-            min_examples_per_player=minibatch_size
+            min_examples_per_player=minibatch_size,
+            num_static_per_game=num_planning_players,
         )
+        for a in agents:
+            a.policy.train()
+            a.value_fn.train()
         t_collect_episodes = time.time()
         print(f"Episode collection took {t_collect_episodes - t_start:.2f} seconds.")
 
         # 2. Flatten storage and compute GAE
         data = flatten_trajectories(trajectories)
         del trajectories
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # 3. PPO update
         ppo_update(
@@ -456,18 +541,22 @@ def train(
             data,
             minibatch_size,
             epochs,
-            microbatch_size=32
         )
-        del data
         t_ppo_update = time.time()
         print(f"PPO update took {t_ppo_update - t_collect_episodes:.2f} seconds.")
 
         # 4. Evaluation & shuffling.
-        if iteration % 5 == 0 and iteration > 0:
+        if iteration % 5 == 0:
             agents_list = agents + list(best_agents.values())
+            for a in agents_list:
+                a.policy.eval()
+                a.value_fn.eval()
             order, skills = rank_against_planning_player(
-                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=500)
-            agents = [agents_list[i] for i in order[:num_agents_train]]
+                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=250)
+            for a in agents_list:
+                a.policy.train()
+                a.value_fn.train()
+            agents = [agents_list[i] for i in order[:num_trainable_players]]
             if args.use_transformer:
                 TransformerAgentCollection.save_agents(
                     agents, [
@@ -485,7 +574,8 @@ def train(
                 agent_index = order[i]
                 best_agents[skills[i]] = copy.deepcopy(
                     agents_list[agent_index])
-            print(f"Best agents' skills: {list(best_agents.keys())}")
+            if best_agents:
+                print(f"Best agents' skills: {list(best_agents.keys())}")
             t_evaluation = time.time()
             print(f"Evaluation took {t_evaluation - t_ppo_update:.2f} seconds.")
 
@@ -495,16 +585,19 @@ def train(
 
 
 def main():
-    num_players = 5
+    num_players = args.num_players
+    assert args.num_players <= args.num_trainable_players + args.num_planning_players
     agents = train(
         num_iterations=args.iterations,
         episodes_per_iter=args.episodes,
         num_players=num_players,
+        num_trainable_players=args.num_trainable_players,
         minibatch_size=args.batch_size,
         epochs=args.epochs,
         policy_lr=args.policy_lr,
         value_lr=args.value_lr,
         resume_dir=args.resume_dir,
+        num_planning_players=args.num_planning_players,
     )
 
     # Find the best agent.

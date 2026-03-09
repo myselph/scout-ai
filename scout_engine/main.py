@@ -40,7 +40,7 @@ def main():
     }
     # Currently only testing 5-player games because the NeuralPlayer wasn't trained
     # on 3 or 4 player games.    
-    for num_players in range(5, 6):
+    for num_players in range(3, 6):
         print(f"Ranking using {num_players}-player games")
         order, skills = rank_against_planning_player(list(players.values()), num_players, num_games_per_player=args.num_games_per_player)
         for player_index, skill in zip(order, skills):
