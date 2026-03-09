@@ -556,7 +556,7 @@ class TransformerAgentCollection(AgentCollection):
     @staticmethod
     def create_agents(num_agents: int, device: torch.device = torch.device("cpu"),
                       policy_lr: float | None = None, value_lr: float | None = None) -> list[Agent]:
-        embed_dim = 64
+        embed_dim = 32
         num_heads = 4
         num_layers = 4
         dim_ffd = 64

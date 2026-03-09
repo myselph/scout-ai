@@ -57,6 +57,18 @@ parser.add_argument(
     default=None
 )
 parser.add_argument(
+    '--num_players',
+    type=int,
+    help='Number of players in a game (3-5)',
+    default=5
+)
+parser.add_argument(
+    '--num_trainable_players',
+    type=int,
+    help='Number of trainable players. Must be >= num_players+num_planning_players',
+    default=5
+)
+parser.add_argument(
     '--resume_dir',
     type=str,
     help='Directory containing .pth files to resume training from; '
@@ -457,6 +469,7 @@ def train(
     num_iterations: int,
     episodes_per_iter: int,
     num_players: int,
+    num_trainable_players: int,
     minibatch_size: int = 512,
     epochs: int = 2,
     policy_lr: float | None = None,
@@ -465,32 +478,30 @@ def train(
     num_planning_players: int = 0,
 ):
     agents = []
-    # Number of agents we train in an iteration.
-    num_agents_train = num_players
     # We keep copies of the best ones.
-    # num_best_agents = int(0.2 * num_agents_train)
+    # num_best_agents = int(0.2 * num_trainable_players)
     num_best_agents = 0
     if resume_dir is not None:
         all_pth = sorted(glob_module.glob(os.path.join(resume_dir, '*.pth')))
         policy_paths = [p for p in all_pth if not p.endswith('_value_fn.pth')]
         value_fn_paths = [p for p in all_pth if p.endswith('_value_fn.pth')]
         value_fn_path = value_fn_paths[-1] if value_fn_paths else None
-        num_agents_train = len(policy_paths)
-        if num_agents_train < num_players:
+        num_trainable_players = len(policy_paths)
+        if num_trainable_players + num_planning_players < num_players:
             raise ValueError(
-                f"resume_dir has {num_agents_train} policy files but num_players={num_players}; "
-                "need at least num_players agents to run self-play"
+                f"resume_dir has {num_trainable_players} policy files but num_players={num_players} "
+                "and num_planning_players={num_planning_players}"
             )
         if args.use_transformer:
             agents = TransformerAgentCollection.load_agents(policy_paths, value_fn_path, device)
         else:
             agents = SimpleAgentCollection.load_agents(policy_paths, value_fn_path, device)
-        print(f"Resumed {num_agents_train} agents from {resume_dir} "
+        print(f"Resumed {num_trainable_players} agents from {resume_dir} "
               f"(value fn: {value_fn_path})")
     elif args.use_transformer:
-        agents = TransformerAgentCollection.create_agents(num_agents_train, device, policy_lr=policy_lr, value_lr=value_lr)
+        agents = TransformerAgentCollection.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
     else:
-        agents = SimpleAgentCollection.create_agents(num_agents_train, device, policy_lr=policy_lr, value_lr=value_lr)
+        agents = SimpleAgentCollection.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
 
     best_agents: dict[float, Agent] = {}
 
@@ -531,9 +542,6 @@ def train(
             minibatch_size,
             epochs,
         )
-        del data
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         t_ppo_update = time.time()
         print(f"PPO update took {t_ppo_update - t_collect_episodes:.2f} seconds.")
 
@@ -544,11 +552,11 @@ def train(
                 a.policy.eval()
                 a.value_fn.eval()
             order, skills = rank_against_planning_player(
-                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=100)
+                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=250)
             for a in agents_list:
                 a.policy.train()
                 a.value_fn.train()
-            agents = [agents_list[i] for i in order[:num_agents_train]]
+            agents = [agents_list[i] for i in order[:num_trainable_players]]
             if args.use_transformer:
                 TransformerAgentCollection.save_agents(
                     agents, [
@@ -566,7 +574,8 @@ def train(
                 agent_index = order[i]
                 best_agents[skills[i]] = copy.deepcopy(
                     agents_list[agent_index])
-            print(f"Best agents' skills: {list(best_agents.keys())}")
+            if best_agents:
+                print(f"Best agents' skills: {list(best_agents.keys())}")
             t_evaluation = time.time()
             print(f"Evaluation took {t_evaluation - t_ppo_update:.2f} seconds.")
 
@@ -576,11 +585,13 @@ def train(
 
 
 def main():
-    num_players = 5
+    num_players = args.num_players
+    assert args.num_players <= args.num_trainable_players + args.num_planning_players
     agents = train(
         num_iterations=args.iterations,
         episodes_per_iter=args.episodes,
         num_players=num_players,
+        num_trainable_players=args.num_trainable_players,
         minibatch_size=args.batch_size,
         epochs=args.epochs,
         policy_lr=args.policy_lr,
