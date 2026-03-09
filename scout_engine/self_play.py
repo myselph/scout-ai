@@ -500,7 +500,10 @@ def train(
 
     for iteration in range(1, num_iterations+1):
         t_start = time.time()
-        # 1. Self-play
+        # 1. Self-play (eval mode so dropout doesn't corrupt stored logprobs)
+        for a in agents:
+            a.policy.eval()
+            a.value_fn.eval()
         trajectories = collect_episodes(
             agents,
             env_constructor,
@@ -509,6 +512,9 @@ def train(
             min_examples_per_player=minibatch_size,
             num_static_per_game=num_planning_players,
         )
+        for a in agents:
+            a.policy.train()
+            a.value_fn.train()
         t_collect_episodes = time.time()
         print(f"Episode collection took {t_collect_episodes - t_start:.2f} seconds.")
 
@@ -534,8 +540,14 @@ def train(
         # 4. Evaluation & shuffling.
         if iteration % 5 == 0:
             agents_list = agents + list(best_agents.values())
+            for a in agents_list:
+                a.policy.eval()
+                a.value_fn.eval()
             order, skills = rank_against_planning_player(
                 [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=100)
+            for a in agents_list:
+                a.policy.train()
+                a.value_fn.train()
             agents = [agents_list[i] for i in order[:num_agents_train]]
             if args.use_transformer:
                 TransformerAgentCollection.save_agents(
