@@ -552,7 +552,7 @@ def train(
                 a.policy.eval()
                 a.value_fn.eval()
             order, skills = rank_against_planning_player(
-                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=250)
+                [NeuralPlayer(a) for a in agents_list], num_players, num_games_per_player=100)
             for a in agents_list:
                 a.policy.train()
                 a.value_fn.train()

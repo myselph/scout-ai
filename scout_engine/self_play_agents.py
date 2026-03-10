@@ -426,7 +426,7 @@ class TransformerPolicyNet(nn.Module):
         token_ids = hand[:, :, 0].long()                                  # [B, 1+N+pad]
         card_pos  = hand[:, :, 1].long()                                  # [B, 1+N+pad]
         ordinals  = hand[:, :, 2].long().clamp(
-            0, self.ordinal_emb.shape[0] - 1)                            # [B, 1+N+pad]
+            0, self.ordinal_emb.shape[0] - 1) * 0.0                            # [B, 1+N+pad]
         embedded = (self.token_embedding(token_ids)
                   + self.card_pos_embedding(card_pos)
                   + self.ordinal_emb[ordinals])                           # [B, 1+N+pad, E]
@@ -467,7 +467,7 @@ class TransformerValueNet(nn.Module):
         token_ids = hand[:, :, 0].long()                                 # [B, 1+N+pad]
         card_pos  = hand[:, :, 1].long()                                 # [B, 1+N+pad]
         ordinals  = hand[:, :, 2].long().clamp(
-            0, self.ordinal_emb.shape[0] - 1)                           # [B, 1+N+pad]
+            0, self.ordinal_emb.shape[0] - 1) * 0.0                          # [B, 1+N+pad]
         embedded = (self.token_embedding(token_ids)
                   + self.card_pos_embedding(card_pos)
                   + self.ordinal_emb[ordinals])                          # [B, 1+N+pad, E]
@@ -520,7 +520,7 @@ class TransformerAgent(Agent):
             num_players = len(info_state.num_cards)
             num_cards_rot = info_state.num_cards[p:] + info_state.num_cards[:p]
             scores_rot = info_state.scores[p:] + info_state.scores[:p]
-            can_scout_rot = info_state.can_scout_and_show[p:] + info_state.can_scout_and_show[:p]
+            can_sas_rot = info_state.can_scout_and_show[p:] + info_state.can_scout_and_show[:p]
 
             # Build the same first NUM_SCALAR_FEATURES features as featurize_numpy,
             # in the same order: num_players, num_cards(5), scores(5), cur_score_diff,
@@ -530,8 +530,8 @@ class TransformerAgent(Agent):
             scores_feat = [0.0] * 5
             scores_feat[:len(scores_rot)] = [float(x) for x in scores_rot]
             cur_score_diff = float(scores_rot[0] - sum(scores_rot[1:]) / num_players)
-            can_scout_feat = [0.0] * 5
-            can_scout_feat[:len(can_scout_rot)] = [float(x) for x in can_scout_rot]
+            can_sas_feat = [0.0] * 5
+            can_sas_feat[:len(can_sas_rot)] = [float(x) for x in can_sas_rot]
             table_values = [c[0] for c in info_state.table]
             table_feat = [
                 1.0 if Util.is_group(table_values) else 0.0,
@@ -540,7 +540,7 @@ class TransformerAgent(Agent):
             ]
             scalar_raw = (
                 [float(num_players)] + num_cards_feat + scores_feat +
-                [cur_score_diff] + can_scout_feat + table_feat
+                [cur_score_diff] + can_sas_feat + table_feat
             )
             scalar_norm = [
                 (scalar_raw[i] - _SCALAR_MEANS[i]) / _SCALAR_STDS[i]
@@ -566,10 +566,10 @@ class TransformerAgentCollection(AgentCollection):
     @staticmethod
     def create_agents(num_agents: int, device: torch.device = torch.device("cpu"),
                       policy_lr: float | None = None, value_lr: float | None = None) -> list[Agent]:
-        embed_dim = 32
+        embed_dim = 64
         num_heads = 4
         num_layers = 4
-        dim_ffd = 64
+        dim_ffd = 128
         max_card_pos = 45
         if policy_lr is None:
             policy_lr = 1e-4
