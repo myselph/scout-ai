@@ -426,7 +426,7 @@ class TransformerPolicyNet(nn.Module):
         token_ids = hand[:, :, 0].long()                                  # [B, 1+N+pad]
         card_pos  = hand[:, :, 1].long()                                  # [B, 1+N+pad]
         ordinals  = hand[:, :, 2].long().clamp(
-            0, self.ordinal_emb.shape[0] - 1) * 0.0                            # [B, 1+N+pad]
+            0, self.ordinal_emb.shape[0] - 1) * 0                            # [B, 1+N+pad]
         embedded = (self.token_embedding(token_ids)
                   + self.card_pos_embedding(card_pos)
                   + self.ordinal_emb[ordinals])                           # [B, 1+N+pad, E]
@@ -467,7 +467,7 @@ class TransformerValueNet(nn.Module):
         token_ids = hand[:, :, 0].long()                                 # [B, 1+N+pad]
         card_pos  = hand[:, :, 1].long()                                 # [B, 1+N+pad]
         ordinals  = hand[:, :, 2].long().clamp(
-            0, self.ordinal_emb.shape[0] - 1) * 0.0                          # [B, 1+N+pad]
+            0, self.ordinal_emb.shape[0] - 1) * 0                          # [B, 1+N+pad]
         embedded = (self.token_embedding(token_ids)
                   + self.card_pos_embedding(card_pos)
                   + self.ordinal_emb[ordinals])                          # [B, 1+N+pad, E]
