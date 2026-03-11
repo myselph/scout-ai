@@ -348,64 +348,26 @@ NUM_SCALAR_FEATURES = 20
 _SCALAR_MEANS: list[float] = _NUMPY_SCALAR_MEANS[:NUM_SCALAR_FEATURES].tolist()
 _SCALAR_STDS: list[float] = _NUMPY_SCALAR_STDS[:NUM_SCALAR_FEATURES].tolist()
 
-dict_tokens = [
-    "<padding>",  # must be at index PADDING_IDX
-    "<CLS>",
-    "True",
-    "False",
-    "<too_small>",
-    "<too_large>",
-    "<score>",
-    "<num_cards>",
-]
+# Token vocabulary for the transformer's hand input.
+# 0=padding, 1=CLS, 2-11=card1-card10 (12 total).
+_HAND_VOCAB_SIZE = 12
+_CLS_TOKEN_IDX = 1
+_CARD1_TOKEN_IDX = 2  # card i → _CARD1_TOKEN_IDX + i - 1
 
-transformer_dict = {token: i for i, token in enumerate(dict_tokens)}
-assert transformer_dict["<padding>"] == PADDING_IDX
-next_index = len(transformer_dict)
-for i in range(1,11):
-    transformer_dict[f"<card{i}>"] = next_index
-    next_index += 1
-dict_int_limits = [-20, 20]
-for i in range(dict_int_limits[0], dict_int_limits[1] + 1):
-    transformer_dict[f"int_{i}"] = next_index
-    next_index += 1
-
-def map_card_to_tf_dict(i: int) -> int:
-    return transformer_dict[f"<card{i}>"]
-    
-SEGMENT_INDICES = {
-    'HAND': 1,   # CLS token and hand card tokens
-    'OTHER': 2,  # scalar feature tokens (fixed-length prefix)
-}
-
-
-def make_sinusoidal_card_embedding(embed_dim: int, max_val: int = 10, base: float = 10.0) -> torch.Tensor:
-    """Sinusoidal embedding table for card ordinal values 0..max_val.
-    Index 0 is the zero vector (non-card tokens). Indices 1..max_val get
-    sinusoidal encodings using the given base (analogous to the original
-    Transformer's base=10000, but tuned for the small range of card values).
-    """
-    table = torch.zeros(max_val + 1, embed_dim)
-    pos = torch.arange(1, max_val + 1, dtype=torch.float).unsqueeze(1)  # [max_val, 1]
-    dim_i = torch.arange(0, embed_dim // 2, dtype=torch.float)           # [embed_dim//2]
-    angles = pos / base ** (2 * dim_i / embed_dim)                       # [max_val, embed_dim//2]
-    table[1:, 0::2] = torch.sin(angles)
-    table[1:, 1::2] = torch.cos(angles[:, :embed_dim - embed_dim // 2])
-    return table
+def map_card_to_token_idx(i: int) -> int:
+    return _CARD1_TOKEN_IDX + i - 1
 
 
 class TransformerPolicyNet(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int,
                  max_card_pos: int = 45):
         super().__init__()
-        self.token_embedding = nn.Embedding(len(transformer_dict), embed_dim)
-        # padding_idx=PADDING_IDX keeps the zero vector for padding positions and
-        # excludes them from gradient updates.
-        self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
-        self.register_buffer('ordinal_emb', make_sinusoidal_card_embedding(embed_dim))
+        self.token_embedding = nn.Embedding(_HAND_VOCAB_SIZE, embed_dim, padding_idx=PADDING_IDX)
+        self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
+                embed_dim, num_heads, dim_ffd, dropout=0.0, batch_first=True, norm_first=True),
+            num_layers)
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim + NUM_SCALAR_FEATURES, 128),
             nn.ReLU(),
@@ -416,20 +378,17 @@ class TransformerPolicyNet(nn.Module):
 
     def forward(
             self,
-            post_move_states: torch.Tensor,  # [B, L, 4] float32
+            post_move_states: torch.Tensor,  # [B, L, 2] float32
             padding_mask: torch.Tensor) -> torch.Tensor:
         # Layout: [other_1..other_20, CLS, hand_1..hand_N, padding...]
-        # Channels: [value/token_id, card_pos, ordinal, segment]
+        # Channels: [value/token_id, card_pos]
         scalar_features = post_move_states[:, :NUM_SCALAR_FEATURES, 0]   # [B, 20]
-        hand = post_move_states[:, NUM_SCALAR_FEATURES:, :]               # [B, 1+N+pad, 4]
+        hand = post_move_states[:, NUM_SCALAR_FEATURES:, :]               # [B, 1+N+pad, 2]
 
         token_ids = hand[:, :, 0].long()                                  # [B, 1+N+pad]
         card_pos  = hand[:, :, 1].long()                                  # [B, 1+N+pad]
-        ordinals  = hand[:, :, 2].long().clamp(
-            0, self.ordinal_emb.shape[0] - 1) * 0                            # [B, 1+N+pad]
         embedded = (self.token_embedding(token_ids)
-                  + self.card_pos_embedding(card_pos)
-                  + self.ordinal_emb[ordinals])                           # [B, 1+N+pad, E]
+                  + self.card_pos_embedding(card_pos))                    # [B, 1+N+pad, E]
 
         hand_padding_mask = token_ids == PADDING_IDX                      # [B, 1+N+pad]
         transformed = self.transformer(
@@ -444,12 +403,12 @@ class TransformerValueNet(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int,
                  max_card_pos: int = 45):
         super().__init__()
-        self.token_embedding = nn.Embedding(len(transformer_dict), embed_dim)
-        self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim, padding_idx=PADDING_IDX)
-        self.register_buffer('ordinal_emb', make_sinusoidal_card_embedding(embed_dim))
+        self.token_embedding = nn.Embedding(_HAND_VOCAB_SIZE, embed_dim, padding_idx=PADDING_IDX)
+        self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, batch_first=True, norm_first=True), num_layers)
+                embed_dim, num_heads, dim_ffd, dropout=0.0, batch_first=True, norm_first=True),
+            num_layers)
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim + NUM_SCALAR_FEATURES, 128),
             nn.ReLU(),
@@ -460,17 +419,14 @@ class TransformerValueNet(nn.Module):
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         # Layout: [other_1..other_20, CLS, hand_1..hand_N, padding...]
-        # Channels: [value/token_id, card_pos, ordinal, segment]
+        # Channels: [value/token_id, card_pos]
         scalar_features = states[:, :NUM_SCALAR_FEATURES, 0]             # [B, 20]
-        hand = states[:, NUM_SCALAR_FEATURES:, :]                        # [B, 1+N+pad, 4]
+        hand = states[:, NUM_SCALAR_FEATURES:, :]                        # [B, 1+N+pad, 2]
 
         token_ids = hand[:, :, 0].long()                                 # [B, 1+N+pad]
         card_pos  = hand[:, :, 1].long()                                 # [B, 1+N+pad]
-        ordinals  = hand[:, :, 2].long().clamp(
-            0, self.ordinal_emb.shape[0] - 1) * 0                          # [B, 1+N+pad]
         embedded = (self.token_embedding(token_ids)
-                  + self.card_pos_embedding(card_pos)
-                  + self.ordinal_emb[ordinals])                          # [B, 1+N+pad, E]
+                  + self.card_pos_embedding(card_pos))                   # [B, 1+N+pad, E]
 
         hand_padding_mask = token_ids == PADDING_IDX                     # [B, 1+N+pad]
         transformed = self.transformer(
@@ -504,16 +460,14 @@ class TransformerAgent(Agent):
         )
 
     def featurize(self, info_states: tuple[InformationState, ...]) -> tuple[torch.Tensor, ...]:
-        # Returns one [L, 4] float32 tensor per info_state.
-        # L = 1 (CLS) + len(hand) + NUM_SCALAR_FEATURES (OTHER tokens).
-        # Channels: [value/token_id, card_pos, ordinal, segment]
-        #   - CLS and hand cards: segment=HAND, channel 0=token_id (int), 1=card_pos, 2=ordinal
-        #   - OTHER tokens: segment=OTHER, channel 0=normalized scalar feature value, 1=2=0
-        # Layout: [CLS, hand_1..hand_N, other_1..other_20]  (padding added by pad_sequence)
+        # Returns one [L, 2] float32 tensor per info_state.
+        # L = NUM_SCALAR_FEATURES (OTHER tokens) + 1 (CLS) + len(hand).
+        # Channels: [value/token_id, card_pos]
+        #   - OTHER tokens: channel 0=normalized scalar feature value, 1=0
+        #   - CLS: channel 0=_CLS_TOKEN_IDX, 1=0
+        #   - hand cards: channel 0=token_idx (int), 1=card_pos (1-indexed)
+        # Layout: [other_1..other_20, CLS, hand_1..hand_N]  (padding added by pad_sequence)
         results: list[torch.Tensor] = []
-        TD: dict[str, int] = transformer_dict
-        SEG_HAND  = float(SEGMENT_INDICES['HAND'])
-        SEG_OTHER = float(SEGMENT_INDICES['OTHER'])
 
         for info_state in info_states:
             p = info_state.current_player
@@ -548,14 +502,13 @@ class TransformerAgent(Agent):
             ]
 
             rows: list[list[float]] = []
-            # Scalar feature tokens first (OTHER segment, channel 0 = normalized value).
-            # Fixed-length prefix means pad_sequence never interleaves padding with them.
+            # Scalar feature tokens first (fixed-length prefix).
             for val in scalar_norm:
-                rows.append([val, 0.0, 0.0, SEG_OTHER])
+                rows.append([val, 0.0])
             # CLS token followed by hand cards (variable-length suffix, padded by pad_sequence)
-            rows.append([float(TD["<CLS>"]), 0.0, 0.0, SEG_HAND])
+            rows.append([float(_CLS_TOKEN_IDX), 0.0])
             for pos, c in enumerate(info_state.hand):
-                rows.append([float(map_card_to_tf_dict(c[0])), float(pos + 1), float(c[0]), SEG_HAND])
+                rows.append([float(map_card_to_token_idx(c[0])), float(pos + 1)])
 
             results.append(torch.tensor(rows, dtype=torch.float32))
 
@@ -566,10 +519,10 @@ class TransformerAgentCollection(AgentCollection):
     @staticmethod
     def create_agents(num_agents: int, device: torch.device = torch.device("cpu"),
                       policy_lr: float | None = None, value_lr: float | None = None) -> list[Agent]:
-        embed_dim = 64
+        embed_dim = 16
         num_heads = 4
-        num_layers = 4
-        dim_ffd = 128
+        num_layers = 2
+        dim_ffd = 32
         max_card_pos = 45
         if policy_lr is None:
             policy_lr = 1e-4
