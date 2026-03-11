@@ -180,18 +180,27 @@ class AgentCollection:
     def create_agents(num_agents: int) -> list[Agent]:
         raise NotImplementedError
 
-    @staticmethod
+    @classmethod
     def load_agents(
+            cls,
             policy_paths: list[str],
-            value_fn_path: str | None = None) -> list[Agent]:
-        raise NotImplementedError
+            value_fn_path: str | None = "",
+            device: torch.device = torch.device("cpu")) -> list[Agent]:
+        agents = cls.create_agents(len(policy_paths), device)
+        for i, policy_path in enumerate(policy_paths):
+            agents[i].policy.load_state_dict(torch.load(policy_path, map_location=device))
+        if value_fn_path:
+            agents[0].value_fn.load_state_dict(torch.load(value_fn_path, map_location=device))
+        return agents
 
     @staticmethod
     def save_agents(
             agents: list[Agent],
             policy_paths: list[str],
             value_fn_path: str):
-        raise NotImplementedError
+        for i, agent in enumerate(agents):
+            torch.save(agent.policy.state_dict(), policy_paths[i])
+        torch.save(agents[0].value_fn.state_dict(), value_fn_path)
 
 
 #############################################################################
@@ -199,49 +208,35 @@ class AgentCollection:
 # simple feedforward MLP.
 # Reuses featurization code I've originally added for ISMCTS value functions.
 ##############################################################################
+def _build_simple_mlp(state_dim: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(state_dim, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 1),
+    )
+
+
 class SimplePolicyNet(nn.Module):
-    # ----------------------------------------------------------------------
     # The Policy network is a ranking model - it takes the state visible to
     # the current player, and the state after each possible move, and "ranks"
     # the moves by producing a logit for each post move state.
-    # ----------------------------------------------------------------------
     def __init__(self, state_dim: int):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
+        self.net = _build_simple_mlp(state_dim)
 
-    def forward(
-            self,
-            post_move_states: torch.Tensor) -> torch.Tensor:
-        """
-        post_move_states: [num_moves, D]
-        return logits: [1, num_moves]
-        """
-        # Output: [N, 1] -> squeeze to [1, N] or [N]
-        return self.net(post_move_states).squeeze(1)
+    def forward(self, post_move_states: torch.Tensor) -> torch.Tensor:
+        return self.net(post_move_states).squeeze(1)  # [B, 1] -> [B]
+
 
 class SimpleValueNet(nn.Module):
-    def __init__(self, state_dim):
+    def __init__(self, state_dim: int):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
+        self.net = _build_simple_mlp(state_dim)
 
-    def forward(
-            self,
-            state: torch.Tensor) -> torch.Tensor:
-        # padding_mask is ignored since the input is always the same length,
-        # but we have it here to use the same interface that Transformers need.
-        return self.net(state)[:, None]
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.net(state).squeeze(1)  # [B, 1] -> [B]
 
 
 class SimpleAgent(Agent):
@@ -306,33 +301,6 @@ class SimpleAgentCollection(AgentCollection):
         return [SimpleAgent(state_dim, policy_lr, value_fn, value_optim, device)
                 for _ in range(num_agents)]
 
-    @staticmethod
-    def load_agents(
-            policy_paths: list[str],
-            value_fn_path: str | None = "",
-            device: torch.device = torch.device("cpu")) -> list[Agent]:
-        # This function allows for loading agents from disk; this can be useful
-        # for checkpointing/resumption, or simply to load a previously trained agent
-        # for evaluation.
-        # When used for evaluation, the value function is not used, so the
-        # value_fn_path can be left empty, and the value function will be randomly
-        # initialized.
-        agents = SimpleAgentCollection.create_agents(len(policy_paths), device)
-        for i, policy_path in enumerate(policy_paths):
-            agents[i].policy.load_state_dict(torch.load(policy_path, map_location=device))
-        if value_fn_path:
-            agents[0].value_fn.load_state_dict(torch.load(value_fn_path, map_location=device))
-        return agents
-
-    @staticmethod
-    def save_agents(
-            agents: list[Agent],
-            policy_paths: list[str],
-            value_fn_path: str):
-        for i, agent in enumerate(agents):
-            torch.save(agent.policy.state_dict(), policy_paths[i])
-        torch.save(agents[0].value_fn.state_dict(), value_fn_path)
-
 
 #############################################################################
 # A Transformer based policy and value network. My primary hope is that these
@@ -358,48 +326,10 @@ def map_card_to_token_idx(i: int) -> int:
     return _CARD1_TOKEN_IDX + i - 1
 
 
-class TransformerPolicyNet(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int,
-                 max_card_pos: int = 45):
-        super().__init__()
-        self.token_embedding = nn.Embedding(_HAND_VOCAB_SIZE, embed_dim, padding_idx=PADDING_IDX)
-        self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim)
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, dropout=0.0, batch_first=True, norm_first=True),
-            num_layers)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim + NUM_SCALAR_FEATURES, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
-
-    def forward(
-            self,
-            post_move_states: torch.Tensor,  # [B, L, 2] float32
-            padding_mask: torch.Tensor) -> torch.Tensor:
-        # Layout: [other_1..other_20, CLS, hand_1..hand_N, padding...]
-        # Channels: [value/token_id, card_pos]
-        scalar_features = post_move_states[:, :NUM_SCALAR_FEATURES, 0]   # [B, 20]
-        hand = post_move_states[:, NUM_SCALAR_FEATURES:, :]               # [B, 1+N+pad, 2]
-
-        token_ids = hand[:, :, 0].long()                                  # [B, 1+N+pad]
-        card_pos  = hand[:, :, 1].long()                                  # [B, 1+N+pad]
-        embedded = (self.token_embedding(token_ids)
-                  + self.card_pos_embedding(card_pos))                    # [B, 1+N+pad, E]
-
-        hand_padding_mask = token_ids == PADDING_IDX                      # [B, 1+N+pad]
-        transformed = self.transformer(
-            embedded, src_key_padding_mask=hand_padding_mask)             # [B, 1+N+pad, E]
-
-        cls_out = transformed[:, 0, :]                                    # [B, E]
-        combined = torch.cat([cls_out, scalar_features], dim=1)          # [B, E+20]
-        return self.mlp(combined).squeeze(1)                              # [B]
-
-
-class TransformerValueNet(nn.Module):
+class TransformerNet(nn.Module):
+    # Shared architecture for both the policy and value transformer networks.
+    # Layout: [other_1..other_20, CLS, hand_1..hand_N, padding...]
+    # Channels: [value/token_id, card_pos]
     def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int,
                  max_card_pos: int = 45):
         super().__init__()
@@ -418,8 +348,6 @@ class TransformerValueNet(nn.Module):
         )
 
     def forward(self, states: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
-        # Layout: [other_1..other_20, CLS, hand_1..hand_N, padding...]
-        # Channels: [value/token_id, card_pos]
         scalar_features = states[:, :NUM_SCALAR_FEATURES, 0]             # [B, 20]
         hand = states[:, NUM_SCALAR_FEATURES:, :]                        # [B, 1+N+pad, 2]
 
@@ -449,7 +377,7 @@ class TransformerAgent(Agent):
             value_optim: torch.optim.Optimizer,
             device: torch.device = torch.device("cpu"),
             max_card_pos: int = 45):
-        policy = TransformerPolicyNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
+        policy = TransformerNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
         super().__init__(
             policy=policy,
             policy_optim=torch.optim.Adam(policy.parameters(), lr=policy_lr),
@@ -513,7 +441,7 @@ class TransformerAgent(Agent):
             results.append(torch.tensor(rows, dtype=torch.float32))
 
         return tuple(results)
-        
+
 
 class TransformerAgentCollection(AgentCollection):
     @staticmethod
@@ -528,7 +456,7 @@ class TransformerAgentCollection(AgentCollection):
             policy_lr = 1e-4
         if value_lr is None:
             value_lr = 3e-4
-        value_fn = TransformerValueNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
+        value_fn = TransformerNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
         value_optim = torch.optim.Adam(value_fn.parameters(), lr=value_lr)
         return [
             TransformerAgent(
@@ -541,24 +469,3 @@ class TransformerAgentCollection(AgentCollection):
                 value_optim,
                 device,
                 max_card_pos) for _ in range(num_agents)]
-
-    @staticmethod
-    def load_agents(
-            policy_paths: list[str],
-            value_fn_path: str | None = "",
-            device: torch.device = torch.device("cpu")) -> list[Agent]:
-        agents = TransformerAgentCollection.create_agents(len(policy_paths), device)
-        for i, policy_path in enumerate(policy_paths):
-            agents[i].policy.load_state_dict(torch.load(policy_path, map_location=device))
-        if value_fn_path:
-            agents[0].value_fn.load_state_dict(torch.load(value_fn_path, map_location=device))
-        return agents
-
-    @staticmethod
-    def save_agents(
-            agents: list[Agent],
-            policy_paths: list[str],
-            value_fn_path: str):
-        for i, agent in enumerate(agents):
-            torch.save(agent.policy.state_dict(), policy_paths[i])
-        torch.save(agents[0].value_fn.state_dict(), value_fn_path)
