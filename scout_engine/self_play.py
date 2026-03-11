@@ -85,6 +85,7 @@ parser.add_argument(
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_USE_CUDA = torch.cuda.is_available()
 print(f"Using device: {device}")
 # cap on legal moves considered per step during rollout. This is usually in the
 # two digit range, but I've seen peaks like 711; and those caused GPU memory
@@ -366,8 +367,7 @@ def flatten_trajectories(
         }
         num_steps = len(actions)
         num_steps_per_game = num_steps / len(traj_list)
-        print(
-            f"Agent {agent_id} - collected {len(out[agent_id]['actions'])} steps - {num_steps_per_game:.1f} steps per game.")
+        print(f"Agent {agent_id} - collected {num_steps} steps - {num_steps_per_game:.1f} steps per game.")
 
     return out
 
@@ -380,7 +380,6 @@ def ppo_update(
     data_by_agent: Dict[int, Dict[str, Any]],
     minibatch_size: int,
     epochs: int,
-    microbatch_size: int = 32,
     microbatch_action_budget: int = 1500,
 ):
     """
@@ -397,6 +396,23 @@ def ppo_update(
         old_logprobs = data["old_logprobs"]
         returns = data["returns"]
         advantages = data["advantages"]
+
+        def flush_microbatch(mb_idx_list, minibatch_len):
+            mb_idx_t = torch.tensor(mb_idx_list)
+            prms = [pre_move_states[i] for i in mb_idx_list]
+            psms = [post_move_states_list[i] for i in mb_idx_list]
+            loss, metrics = ppo_loss(
+                agents[agent_id],
+                pre_move_states=prms,
+                post_move_states_list=psms,
+                action_idx=actions[mb_idx_t],
+                old_logprob=old_logprobs[mb_idx_t].to(device),
+                returns=returns[mb_idx_t].to(device),
+                advantages=advantages[mb_idx_t].to(device),
+                minibatch_size=minibatch_len,
+            )
+            loss.backward()
+            del loss, metrics, prms, psms
 
         N = len(pre_move_states)
         for epoch in range(epochs):
@@ -419,45 +435,25 @@ def ppo_update(
                 # (transitions * actions_per_transition) stays bounded.
                 minibatch_len = len(minibatch_indices)
 
-                def flush_microbatch(mb_idx_list):
-                    mb_idx_t = torch.tensor(mb_idx_list)
-                    prms = [pre_move_states[i] for i in mb_idx_list]
-                    psms = [post_move_states_list[i] for i in mb_idx_list]
-                    loss, metrics = ppo_loss(
-                        agents[agent_id],
-                        pre_move_states=prms,
-                        post_move_states_list=psms,
-                        action_idx=actions[mb_idx_t],
-                        old_logprob=old_logprobs[mb_idx_t].to(device),
-                        returns=returns[mb_idx_t].to(device),
-                        advantages=advantages[mb_idx_t].to(device),
-                        minibatch_size=minibatch_len,
-                    )
-                    loss.backward()
-                    del loss, metrics, prms, psms
-
                 mb_indices = []
                 mb_action_count = 0
                 for idx in minibatch_indices.tolist():
                     n = len(post_move_states_list[idx])
                     if mb_indices and mb_action_count + n > microbatch_action_budget:
-                        flush_microbatch(mb_indices)
+                        flush_microbatch(mb_indices, minibatch_len)
                         mb_indices = []
                         mb_action_count = 0
                     mb_indices.append(idx)
                     mb_action_count += n
                 if mb_indices:
-                    flush_microbatch(mb_indices)
+                    flush_microbatch(mb_indices, minibatch_len)
 
                 # Step optimizer after full minibatch
                 agents[agent_id].policy_optim.step()
                 agents[agent_id].value_optim.step()
 
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
         del pre_move_states, post_move_states_list, data
-        if torch.cuda.is_available():
+        if _USE_CUDA:
             torch.cuda.empty_cache()
 
 
@@ -476,7 +472,9 @@ def train(
     value_lr: float | None = None,
     resume_dir: str | None = None,
     num_planning_players: int = 0,
+    use_transformer: bool = False,
 ):
+    agent_factory = TransformerAgentCollection if use_transformer else SimpleAgentCollection
     agents = []
     # We keep copies of the best ones.
     # num_best_agents = int(0.2 * num_agents_train)
@@ -492,16 +490,11 @@ def train(
                 f"resume_dir has {num_trainable_players} policy files but num_players={num_players} "
                 "and num_planning_players={num_planning_players}"
             )
-        if args.use_transformer:
-            agents = TransformerAgentCollection.load_agents(policy_paths, value_fn_path, device)
-        else:
-            agents = SimpleAgentCollection.load_agents(policy_paths, value_fn_path, device)
+        agents = agent_factory.load_agents(policy_paths, value_fn_path, device)
         print(f"Resumed {num_trainable_players} agents from {resume_dir} "
               f"(value fn: {value_fn_path})")
-    elif args.use_transformer:
-        agents = TransformerAgentCollection.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
     else:
-        agents = SimpleAgentCollection.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
+        agents = agent_factory.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
 
     best_agents: dict[float, Agent] = {}
 
@@ -532,7 +525,7 @@ def train(
         # 2. Flatten storage and compute GAE
         data = flatten_trajectories(trajectories)
         del trajectories
-        if torch.cuda.is_available():
+        if _USE_CUDA:
             torch.cuda.empty_cache()
 
         # 3. PPO update
@@ -557,18 +550,12 @@ def train(
                 a.policy.train()
                 a.value_fn.train()
             agents = [agents_list[i] for i in order[:num_trainable_players]]
-            if args.use_transformer:
-                TransformerAgentCollection.save_agents(
-                    agents, [
-                        f"transformer_agent_{i}_it_{iteration}_skill_{
-                            skills[i]:.2f}.pth" for i in range(
-                            len(agents))], f"transformer_agent_it_{iteration}_value_fn.pth")
-            else:
-                SimpleAgentCollection.save_agents(
-                    agents, [
-                        f"simple_agent_{i}_it_{iteration}_skill_{
-                            skills[i]:.2f}.pth" for i in range(
-                            len(agents))], f"simple_agent_it_{iteration}_value_fn.pth")
+            prefix = "transformer_agent" if use_transformer else "simple_agent"
+            agent_factory.save_agents(
+                agents, [
+                    f"{prefix}_{i}_it_{iteration}_skill_{
+                        skills[i]:.2f}.pth" for i in range(
+                        len(agents))], f"{prefix}_it_{iteration}_value_fn.pth")
             best_agents = {}
             for i in range(num_best_agents):
                 agent_index = order[i]
@@ -598,11 +585,12 @@ def main():
         value_lr=args.value_lr,
         resume_dir=args.resume_dir,
         num_planning_players=args.num_planning_players,
+        use_transformer=args.use_transformer,
     )
 
     # Find the best agent.
     print("Finding best agent...")
-    players = [lambda: NeuralPlayer(agents[i]) for i in range(num_players)]
+    players = [lambda a=agents[i]: NeuralPlayer(a) for i in range(num_players)]
     wins = [0] * len(players)
     for reps in range(0, 50):
         scores = play_game([p() for p in players])
