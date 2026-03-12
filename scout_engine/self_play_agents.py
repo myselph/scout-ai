@@ -460,12 +460,12 @@ class TransformerAgentCollection(AgentCollection):
         value_optim = torch.optim.Adam(value_fn.parameters(), lr=value_lr)
         return [
             TransformerAgent(
-                embed_dim,
-                num_heads,
-                dim_ffd,
-                num_layers,
-                policy_lr,
-                value_fn,
-                value_optim,
-                device,
-                max_card_pos) for _ in range(num_agents)]
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                dim_ffd=dim_ffd,
+                policy_lr=policy_lr,
+                value_fn=value_fn,
+                value_optim=value_optim,
+                device=device,
+                max_card_pos=max_card_pos) for _ in range(num_agents)]
