@@ -69,6 +69,42 @@ parser.add_argument(
     default=5
 )
 parser.add_argument(
+    '--embed_dim',
+    type=int,
+    help='Transformer embedding dimension (transformer only)',
+    default=16
+)
+parser.add_argument(
+    '--num_heads',
+    type=int,
+    help='Number of attention heads (transformer only)',
+    default=4
+)
+parser.add_argument(
+    '--num_layers',
+    type=int,
+    help='Number of transformer encoder layers (transformer only)',
+    default=2
+)
+parser.add_argument(
+    '--dim_ffd',
+    type=int,
+    help='Transformer feedforward layer dimension (transformer only)',
+    default=32
+)
+parser.add_argument(
+    '--norm_first',
+    action=argparse.BooleanOptionalAction,
+    help='Use pre-norm (norm_first=True) in transformer layers (transformer only)',
+    default=True
+)
+parser.add_argument(
+    '--dropout',
+    type=float,
+    help='Dropout rate in transformer layers (transformer only)',
+    default=0.0
+)
+parser.add_argument(
     '--resume_dir',
     type=str,
     help='Directory containing .pth files to resume training from; '
@@ -473,8 +509,16 @@ def train(
     resume_dir: str | None = None,
     num_planning_players: int = 0,
     use_transformer: bool = False,
+    embed_dim: int = 16,
+    num_heads: int = 4,
+    num_layers: int = 2,
+    dim_ffd: int = 32,
+    norm_first: bool = True,
+    dropout: float = 0.0,
 ):
     agent_factory = TransformerAgentCollection if use_transformer else SimpleAgentCollection
+    transformer_kwargs = dict(embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers,
+                              dim_ffd=dim_ffd, norm_first=norm_first, dropout=dropout)
     agents = []
     # We keep copies of the best ones.
     # num_best_agents = int(0.2 * num_agents_train)
@@ -494,7 +538,9 @@ def train(
         print(f"Resumed {num_trainable_players} agents from {resume_dir} "
               f"(value fn: {value_fn_path})")
     else:
-        agents = agent_factory.create_agents(num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr)
+        agents = agent_factory.create_agents(
+            num_trainable_players, device, policy_lr=policy_lr, value_lr=value_lr,
+            **(transformer_kwargs if use_transformer else {}))
 
     best_agents: dict[float, Agent] = {}
 
@@ -586,6 +632,12 @@ def main():
         resume_dir=args.resume_dir,
         num_planning_players=args.num_planning_players,
         use_transformer=args.use_transformer,
+        embed_dim=args.embed_dim,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dim_ffd=args.dim_ffd,
+        norm_first=args.norm_first,
+        dropout=args.dropout,
     )
 
     # Find the best agent.

@@ -331,13 +331,13 @@ class TransformerNet(nn.Module):
     # Layout: [other_1..other_20, CLS, hand_1..hand_N, padding...]
     # Channels: [value/token_id, card_pos]
     def __init__(self, embed_dim: int, num_heads: int, dim_ffd: int, num_layers: int,
-                 max_card_pos: int = 45):
+                 norm_first: bool = True, dropout: float = 0.0, max_card_pos: int = 45):
         super().__init__()
         self.token_embedding = nn.Embedding(_HAND_VOCAB_SIZE, embed_dim, padding_idx=PADDING_IDX)
         self.card_pos_embedding = nn.Embedding(max_card_pos + 1, embed_dim)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                embed_dim, num_heads, dim_ffd, dropout=0.0, batch_first=True, norm_first=True),
+                embed_dim, num_heads, dim_ffd, dropout=dropout, batch_first=True, norm_first=norm_first),
             num_layers)
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim + NUM_SCALAR_FEATURES, 128),
@@ -376,8 +376,10 @@ class TransformerAgent(Agent):
             value_fn: nn.Module,
             value_optim: torch.optim.Optimizer,
             device: torch.device = torch.device("cpu"),
+            norm_first: bool = True,
+            dropout: float = 0.0,
             max_card_pos: int = 45):
-        policy = TransformerNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
+        policy = TransformerNet(embed_dim, num_heads, dim_ffd, num_layers, norm_first, dropout, max_card_pos)
         super().__init__(
             policy=policy,
             policy_optim=torch.optim.Adam(policy.parameters(), lr=policy_lr),
@@ -446,17 +448,15 @@ class TransformerAgent(Agent):
 class TransformerAgentCollection(AgentCollection):
     @staticmethod
     def create_agents(num_agents: int, device: torch.device = torch.device("cpu"),
-                      policy_lr: float | None = None, value_lr: float | None = None) -> list[Agent]:
-        embed_dim = 16
-        num_heads = 4
-        num_layers = 2
-        dim_ffd = 32
+                      policy_lr: float | None = None, value_lr: float | None = None,
+                      embed_dim: int = 16, num_heads: int = 4, num_layers: int = 2,
+                      dim_ffd: int = 32, norm_first: bool = True, dropout: float = 0.0) -> list[Agent]:
         max_card_pos = 45
         if policy_lr is None:
             policy_lr = 1e-4
         if value_lr is None:
             value_lr = 3e-4
-        value_fn = TransformerNet(embed_dim, num_heads, dim_ffd, num_layers, max_card_pos)
+        value_fn = TransformerNet(embed_dim, num_heads, dim_ffd, num_layers, norm_first, dropout, max_card_pos)
         value_optim = torch.optim.Adam(value_fn.parameters(), lr=value_lr)
         return [
             TransformerAgent(
@@ -468,4 +468,6 @@ class TransformerAgentCollection(AgentCollection):
                 value_fn=value_fn,
                 value_optim=value_optim,
                 device=device,
+                norm_first=norm_first,
+                dropout=dropout,
                 max_card_pos=max_card_pos) for _ in range(num_agents)]
