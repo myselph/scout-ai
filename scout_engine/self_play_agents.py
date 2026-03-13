@@ -292,7 +292,7 @@ class SimpleAgentCollection(AgentCollection):
     @staticmethod
     def create_agents(num_agents: int, device: torch.device = torch.device("cpu"),
                       policy_lr: float | None = None, value_lr: float | None = None) -> list[Agent]:
-        state_dim = 57
+        state_dim = 55
         if policy_lr is None:
             policy_lr = 3e-3
         if value_lr is None:

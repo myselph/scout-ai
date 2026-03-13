@@ -60,16 +60,6 @@ def _featurize_single(record: StateAndScoreRecord) -> list[float]:
       + [run_lengths.count(i) for i in range(2, 11)] \
       + [group_lengths.count(i) for i in range(2, 11)]
 
-    shows = Util.find_shows(hand_values, table_values)
-    show_groups = [s for s in shows if Util.is_group(
-        hand_values[s.startPos:s.startPos + s.length])]
-    show_runs = [s for s in shows if Util.is_run(
-        hand_values[s.startPos:s.startPos + s.length])]
-    show_features = [
-        max([s.length for s in show_groups]) if show_groups else 0,
-        max([s.length for s in show_runs]) if show_runs else 0
-    ]
-
     return (
         num_players +
         num_cards +
@@ -77,8 +67,7 @@ def _featurize_single(record: StateAndScoreRecord) -> list[float]:
         cur_score_diff +
         can_scout_and_show +
         table_features +
-        hand_features +
-        show_features)
+        hand_features)
 
 
 # Normalization constants - kept here so both torch and numpy code can share them.
@@ -93,7 +82,6 @@ NORM_MEANS = np.array([
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    # hand val hist
     0, 0, 0, 0, 0, 0, 0, 0, 0,       # run len hist
     0, 0, 0, 0, 0, 0, 0, 0, 0,       # group len hist
-    0, 0,                             # shows
 ], dtype=np.float32)
 
 NORM_STDS = np.array([
@@ -107,7 +95,6 @@ NORM_STDS = np.array([
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1,
 ], dtype=np.float32)
 
 
