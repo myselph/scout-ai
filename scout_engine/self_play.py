@@ -534,7 +534,8 @@ def train(
                 f"resume_dir has {num_trainable_players} policy files but num_players={num_players} "
                 "and num_planning_players={num_planning_players}"
             )
-        agents = agent_factory.load_agents(policy_paths, value_fn_path, device)
+        agents = agent_factory.load_agents(policy_paths, value_fn_path, device,
+                                           **(transformer_kwargs if use_transformer else {}))
         print(f"Resumed {num_trainable_players} agents from {resume_dir} "
               f"(value fn: {value_fn_path})")
     else:

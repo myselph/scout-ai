@@ -185,8 +185,9 @@ class AgentCollection:
             cls,
             policy_paths: list[str],
             value_fn_path: str | None = "",
-            device: torch.device = torch.device("cpu")) -> list[Agent]:
-        agents = cls.create_agents(len(policy_paths), device)
+            device: torch.device = torch.device("cpu"),
+            **kwargs) -> list[Agent]:
+        agents = cls.create_agents(len(policy_paths), device, **kwargs)
         for i, policy_path in enumerate(policy_paths):
             agents[i].policy.load_state_dict(torch.load(policy_path, map_location=device))
         if value_fn_path:
